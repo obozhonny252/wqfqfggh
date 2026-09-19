@@ -1,6 +1,5 @@
 -- ============================================================
--- OBJECT TRACKER v11 - SKYFIRE auto edition
--- base: v8 (loading worked) + blacklist/limit + 2D labels
+-- OBJECT TRACKER v12 - SKYFIRE auto edition
 -- ============================================================
 
 local Rayfield
@@ -89,6 +88,9 @@ local CONFIG = {
     labelTextSize      = 14,
     labelOffsetY       = 22,
     labelPoolSize      = 40,
+
+    autoStartAUTO_FIND = true,  -- v12: на старте сам делает AUTO FIND
+    autoStartDelay     = 3,
 }
 
 local currentDistance = CONFIG.startDistance
@@ -156,12 +158,12 @@ local function updateAutoHeight()
 end
 
 -- ============================================================
--- HELPERS (v8 логика)
+-- HELPERS
 -- ============================================================
 local function hasBlacklistedName(name)
     if type(name) ~= "string" then return true end
     local l = string.lower(name)
-    -- если в имени есть слово дрона — это не мусор (защита от "Rocket"/"rock")
+    -- приоритет: если слово дрона в имени — это не мусор
     for _, w in ipairs(CONFIG.droneKeywords) do
         if string.find(l, w, 1, true) then return false end
     end
@@ -171,7 +173,19 @@ local function hasBlacklistedName(name)
     return false
 end
 
--- v11: обход с блэклистом и лимитом (это единственное нововведение в обходе)
+-- v12: матч по имени против droneKeywords
+local function hasDroneKeyword(name)
+    if type(name) ~= "string" then return false end
+    local l = string.lower(name)
+    for _, w in ipairs(CONFIG.droneKeywords) do
+        if string.find(l, w, 1, true) then return true end
+    end
+    for _, w in ipairs(extraKeywords) do
+        if string.find(l, w, 1, true) then return true end
+    end
+    return false
+end
+
 local function collectDescendants(root, maxDepth, maxCount, applyBlacklist)
     maxDepth = maxDepth or CONFIG.nearbyDepth
     maxCount = maxCount or CONFIG.scanMaxCount
@@ -184,7 +198,7 @@ local function collectDescendants(root, maxDepth, maxCount, applyBlacklist)
             if count >= maxCount then return end
             local child = children[i]
             if applyBlacklist and hasBlacklistedName(child.Name) then
-                -- пропускаем ветку целиком
+                -- skip subtree
             else
                 count = count + 1
                 result[count] = child
@@ -202,11 +216,21 @@ local function classAllowed(obj)
     return CONFIG.allowedClasses[obj.ClassName] == true
 end
 
+-- v12: если имя матчит drone keyword — размер и flyMinY не проверяем
 local function isLikelyDrone(obj)
     if not classAllowed(obj) then return false end
     if hasBlacklistedName(obj.Name) then return false end
+
     local pos, size = getPosSize(obj)
-    if not pos or not size then return false end
+    if not pos then return false end
+
+    if hasDroneKeyword(obj.Name) then
+        -- сильный сигнал: только грубая проверка Y (не глубоко под землёй)
+        if pos.Y < CONFIG.groundY - 5 then return false end
+        return true
+    end
+
+    if not size then return false end
     if size < CONFIG.minSizeMagnitude then return false end
     if size > CONFIG.maxSizeMagnitude then return false end
     if pos.Y < CONFIG.flyMinY then return false end
@@ -324,7 +348,10 @@ local function isDestroyed(obj)
     if not obj.Parent or not obj:IsDescendantOf(workspace) then return true end
 
     local pos = getPosSize(obj)
-    if pos and pos.Y < CONFIG.groundY then return true end
+    -- v12: если в имени есть ключевое слово — не убиваем за Y
+    if pos and pos.Y < CONFIG.groundY and not hasDroneKeyword(obj.Name) then
+        return true
+    end
 
     if obj:IsA("Model") then
         local hum = obj:FindFirstChildOfClass("Humanoid")
@@ -395,7 +422,7 @@ local function removeTracked(inst)
 end
 
 -- ============================================================
--- 2D DISTANCE LABELS (v11: через PlayerGui, без CoreGui)
+-- 2D DISTANCE LABELS
 -- ============================================================
 local distGui = nil
 local labelPool = {}
@@ -404,10 +431,7 @@ task.spawn(function()
     local ok, pg = pcall(function()
         return LocalPlayer:WaitForChild("PlayerGui", 10)
     end)
-    if not ok or not pg then
-        warn("[OT] PlayerGui not ready, 2D labels disabled")
-        return
-    end
+    if not ok or not pg then return end
     local sg = Instance.new("ScreenGui")
     sg.Name = "OT_DistGUI"
     sg.ResetOnSpawn = false
@@ -477,7 +501,7 @@ end)
 -- RAYFIELD UI
 -- ============================================================
 local Window = Rayfield:CreateWindow({
-    Name = "Object Tracker v11",
+    Name = "Object Tracker v12",
     LoadingTitle = "Object Tracker",
     LoadingSubtitle = "SKYFIRE",
     ConfigurationSaving = { Enabled = false },
@@ -492,88 +516,90 @@ local AutoInfo = MainTab:CreateParagraph({
     Title = "Status", Content = "Initializing...",
 })
 
+-- вынесена в отдельную функцию, чтобы дергать и автостартом, и кнопкой
+local function runAutoFind()
+    task.spawn(function()
+        AutoInfo:Set({Title = "Auto", Content = "Detecting ground..."})
+        task.wait(0.1)
+        updateAutoHeight()
+        trackAllFlying = true
+
+        for inst in pairs(tracked) do removeHighlightFrom(inst) end
+        tracked = {}
+        patterns = {}
+        for _, kw in ipairs(CONFIG.droneKeywords) do
+            table.insert(patterns, {id=kw, match="contains", displayName=kw})
+        end
+        for _, kw in ipairs(extraKeywords) do
+            table.insert(patterns, {id=kw, match="contains", displayName=kw})
+        end
+
+        AutoInfo:Set({
+            Title = "Auto",
+            Content = string.format("Ground Y: %.0f  FlyMin: %.0f\nScanning...",
+                CONFIG.groundY, CONFIG.flyMinY)
+        })
+
+        local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
+                                       CONFIG.scanMaxCount, true)
+        local found = {}
+        local total = 0
+        local keyFPV, keyTopol = 0, 0
+        local keywordHit, keywordPass = 0, 0
+
+        for _, obj in ipairs(all) do
+            if obj:IsA("BasePart") or obj:IsA("Model") then
+                if hasDroneKeyword(obj.Name) then
+                    keywordHit = keywordHit + 1
+                    if isLikelyDrone(obj) then keywordPass = keywordPass + 1 end
+                end
+            end
+            if isLikelyDrone(obj) then
+                local nm = string.lower(obj.Name)
+                if string.find(nm, "fpv", 1, true) then keyFPV = keyFPV + 1 end
+                if string.find(nm, "topol", 1, true) then keyTopol = keyTopol + 1 end
+
+                local matched = nil
+                for _, p in ipairs(patterns) do
+                    if nameMatchesPattern(obj.Name, p) then
+                        matched = p.id
+                        break
+                    end
+                end
+                if matched then
+                    addTracked(obj, obj.Name)
+                    found[matched] = (found[matched] or 0) + 1
+                    total = total + 1
+                end
+            end
+        end
+
+        print(string.format("[OT] AUTO FIND: kwHit=%d kwPass=%d FPV=%d Topol=%d total=%d scanned=%d flyMinY=%.0f groundY=%.0f",
+            keywordHit, keywordPass, keyFPV, keyTopol, total, #all,
+            CONFIG.flyMinY, CONFIG.groundY))
+
+        local header = string.format(
+            "Gnd:%.0f Fly:%.0f | kwHit=%d kwPass=%d\nFPV=%d Topol=%d total=%d scanned=%d",
+            CONFIG.groundY, CONFIG.flyMinY,
+            keywordHit, keywordPass, keyFPV, keyTopol, total, #all)
+
+        local lines = {}
+        for k, v in pairs(found) do table.insert(lines, k..": "..v) end
+        table.sort(lines)
+
+        if #lines == 0 then
+            AutoInfo:Set({Title = "Auto - 0 found", Content = header.."\nTrack ALL: ON"})
+        else
+            local chunk = {}
+            for i = 1, math.min(#lines, 15) do table.insert(chunk, lines[i]) end
+            AutoInfo:Set({Title = "Auto - found", Content = header.."\n"..table.concat(chunk, "\n")})
+        end
+    end)
+end
+
 MainTab:CreateButton({
     Name = ">>> AUTO FIND <<<",
-    Callback = function()
-        task.spawn(function()
-            AutoInfo:Set({Title = "Auto", Content = "Detecting ground..."})
-            task.wait(0.1)
-            updateAutoHeight()
-            trackAllFlying = true
-
-            for inst in pairs(tracked) do removeHighlightFrom(inst) end
-            tracked = {}
-            patterns = {}
-            for _, kw in ipairs(CONFIG.droneKeywords) do
-                table.insert(patterns, {id=kw, match="contains", displayName=kw})
-            end
-            for _, kw in ipairs(extraKeywords) do
-                table.insert(patterns, {id=kw, match="contains", displayName=kw})
-            end
-
-            AutoInfo:Set({
-                Title = "Auto",
-                Content = string.format("Ground Y: %.0f  FlyMin: %.0f\nScanning...",
-                    CONFIG.groundY, CONFIG.flyMinY)
-            })
-
-            local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
-                                           CONFIG.scanMaxCount, true)
-            local found = {}
-            local total = 0
-            local keyFPV, keyTopol = 0, 0
-
-            for _, obj in ipairs(all) do
-                if isLikelyDrone(obj) then
-                    local nm = string.lower(obj.Name)
-                    if string.find(nm, "fpv", 1, true) then keyFPV = keyFPV + 1 end
-                    if string.find(nm, "topol", 1, true) then keyTopol = keyTopol + 1 end
-
-                    local matched = nil
-                    for _, p in ipairs(patterns) do
-                        if nameMatchesPattern(obj.Name, p) then
-                            matched = p.id
-                            break
-                        end
-                    end
-                    if matched then
-                        addTracked(obj, obj.Name)
-                        found[matched] = (found[matched] or 0) + 1
-                        total = total + 1
-                    end
-                end
-            end
-
-            print(string.format("[OT] AUTO FIND: FPV=%d Topol=%d total=%d scanned=%d",
-                keyFPV, keyTopol, total, #all))
-
-            local lines = {}
-            for k, v in pairs(found) do
-                table.insert(lines, k..": "..v)
-            end
-            table.sort(lines)
-
-            local header = string.format(
-                "Ground Y: %.0f  FlyMin: %.0f\nFPV=%d  Topol=%d  total=%d",
-                CONFIG.groundY, CONFIG.flyMinY, keyFPV, keyTopol, total)
-
-            if #lines == 0 then
-                AutoInfo:Set({
-                    Title = "Auto - nothing found",
-                    Content = header.."\nTrack ALL: ON. Wait for drones."
-                })
-            else
-                local chunk = {}
-                for i = 1, math.min(#lines, 20) do
-                    table.insert(chunk, lines[i])
-                end
-                AutoInfo:Set({
-                    Title = "Auto - found",
-                    Content = header.."\n"..table.concat(chunk, "\n")
-                })
-            end
-        end)
-    end,
+    Callback = runAutoFind,
 })
 
 MainTab:CreateSection("Distance")
@@ -635,50 +661,18 @@ MainTab:CreateButton({
         if scanRunning then return end
         scanRunning = true
         task.spawn(function()
-            local kwList = {}
-            for _, k in ipairs(CONFIG.droneKeywords) do table.insert(kwList, k) end
-            for _, k in ipairs(extraKeywords) do table.insert(kwList, k) end
-
             local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
                                            CONFIG.scanMaxCount, true)
-            local groups, total = {}, 0
+            local total = 0
             for _, obj in ipairs(all) do
-                if isLikelyDrone(obj) then
-                    local name = string.lower(obj.Name)
-                    for _, kw in ipairs(kwList) do
-                        if string.find(name, kw, 1, true) then
-                            local base = obj.Name:gsub("%d+$",""):gsub("[_%-%.]%d+$","")
-                            if base ~= "" then
-                                groups[base] = (groups[base] or 0) + 1
-                                total = total + 1
-                            end
-                            break
-                        end
-                    end
+                if not tracked[obj] and isLikelyDrone(obj) then
+                    addTracked(obj, obj.Name)
+                    total = total + 1
                 end
             end
-            for base in pairs(groups) do
-                local exists = false
-                for _, p in ipairs(patterns) do
-                    if p.id == base then exists = true break end
-                end
-                if not exists then
-                    table.insert(patterns, {id=base, match="prefix", displayName=base})
-                end
-            end
-            for _, p in ipairs(patterns) do
-                for _, obj in ipairs(all) do
-                    if not tracked[obj] and isLikelyDrone(obj)
-                       and nameMatchesPattern(obj.Name, p) then
-                        addTracked(obj, p.displayName or obj.Name)
-                    end
-                end
-            end
-            local lines = {}
-            for k, v in pairs(groups) do table.insert(lines, k..": "..v) end
-            table.sort(lines)
-            table.insert(lines, 1, "Total: "..total)
-            AutoInfo:Set({Title = "Scan", Content = table.concat(lines, "\n")})
+            AutoInfo:Set({Title = "Scan",
+                Content = string.format("scanned=%d newTracked=%d flyMinY=%.0f",
+                    #all, total, CONFIG.flyMinY)})
             scanRunning = false
         end)
     end,
@@ -729,9 +723,74 @@ local function doNearbyScan()
     end)
 end
 
+-- v12: диагностика — почему ничего не находится
+local function doDiagnose()
+    task.spawn(function()
+        local pp = getPlayerPos() or Vector3.new()
+        local all = collectDescendants(workspace, 5, 8000, false) -- без блэклиста!
+        local lines = {}
+        local stats = {hit=0, ok=0, cls=0, bl=0, size=0, y=0, nopos=0}
+        local samples = {}
+        for _, obj in ipairs(all) do
+            if not (obj:IsA("BasePart") or obj:IsA("Model")) then continue end
+            if hasDroneKeyword(obj.Name) then
+                stats.hit = stats.hit + 1
+                local reason = "OK"
+                if not classAllowed(obj) then
+                    reason = "class:"..obj.ClassName; stats.cls = stats.cls + 1
+                elseif hasBlacklistedName(obj.Name) then
+                    reason = "blacklist"; stats.bl = stats.bl + 1
+                else
+                    local pos, size = getPosSize(obj)
+                    if not pos then
+                        reason = "no-pos"; stats.nopos = stats.nopos + 1
+                    elseif not size then
+                        reason = "no-size"; stats.size = stats.size + 1
+                    elseif size < CONFIG.minSizeMagnitude then
+                        reason = string.format("too-small:S=%.2f", size); stats.size = stats.size + 1
+                    elseif size > CONFIG.maxSizeMagnitude then
+                        reason = string.format("too-big:S=%.1f", size); stats.size = stats.size + 1
+                    elseif pos.Y < CONFIG.flyMinY then
+                        reason = string.format("too-low:Y=%.0f<%.0f", pos.Y, CONFIG.flyMinY); stats.y = stats.y + 1
+                    end
+                end
+                if reason == "OK" then stats.ok = stats.ok + 1 end
+                local pos = getPosSize(obj)
+                local yv = pos and pos.Y or -99999
+                table.insert(samples, string.format("%s|%s|Y=%.0f|%s",
+                    obj.ClassName, obj.Name, yv, reason))
+            end
+        end
+        table.sort(samples)
+        local hdr = string.format(
+            "Gnd=%.0f Fly=%.0f minS=%.1f maxS=%.1f depth=%d\n"..
+            "kwHit=%d ok=%d cls=%d bl=%d size=%d y=%d nopos=%d",
+            CONFIG.groundY, CONFIG.flyMinY, CONFIG.minSizeMagnitude, CONFIG.maxSizeMagnitude,
+            CONFIG.nearbyDepth, stats.hit, stats.ok, stats.cls, stats.bl, stats.size, stats.y, stats.nopos)
+        local chunk = {}
+        for i = 1, math.min(#samples, 25) do
+            table.insert(chunk, samples[i])
+        end
+        if #chunk == 0 then chunk = {"no keyword-matching objects at all"} end
+        pcall(function()
+            NearbyParagraph:Set({
+                Title = "DIAGNOSE (hit="..stats.hit..", ok="..stats.ok..")",
+                Content = hdr.."\n---\n"..table.concat(chunk, "\n"),
+            })
+        end)
+        print("[OT] DIAGNOSE "..hdr)
+        for _, s in ipairs(chunk) do print("[OT] "..s) end
+    end)
+end
+
 MainTab:CreateButton({
     Name = "List nearby (F)",
     Callback = doNearbyScan,
+})
+
+MainTab:CreateButton({
+    Name = "DIAGNOSE (why nothing?)",
+    Callback = doDiagnose,
 })
 
 MainTab:CreateButton({
@@ -770,10 +829,6 @@ SettingsTab:CreateSlider({
     Callback = function(v)
         CONFIG.flyMinY = v
         CONFIG.autoHeight = false
-        for inst in pairs(tracked) do
-            local p = getPosSize(inst)
-            if p and p.Y < v then removeTracked(inst) end
-        end
     end,
 })
 
@@ -1016,7 +1071,7 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- QUEUE AUTO-PICKUP (с ранним блэклистом)
+-- QUEUE
 -- ============================================================
 local newObjectsQueue = {}
 
@@ -1118,18 +1173,26 @@ task.spawn(function()
     pcall(function()
         AutoInfo:Set({
             Title = "Ready",
-            Content = string.format("Ground Y: %.0f\nFlyMin: %.0f\n\nPress AUTO FIND or F.",
-                CONFIG.groundY, CONFIG.flyMinY)
+            Content = string.format("Ground Y: %.0f\nFlyMin: %.0f\n\nAUTO FIND запустится через %d сек.",
+                CONFIG.groundY, CONFIG.flyMinY, CONFIG.autoStartDelay)
         })
     end)
 end)
 
+-- v12: автостарт
+if CONFIG.autoStartAUTO_FIND then
+    task.spawn(function()
+        task.wait(CONFIG.autoStartDelay)
+        pcall(runAutoFind)
+    end)
+end
+
 pcall(function()
     Rayfield:Notify({
-        Title = "Object Tracker v11",
-        Content = "K - window | F - scan | AUTO FIND - start",
+        Title = "Object Tracker v12",
+        Content = "K - окно | F - скан | DIAGNOSE - диагностика",
         Duration = 5,
     })
 end)
 
-print("[ObjectTracker v11] ready")
+print("[ObjectTracker v12] ready")
