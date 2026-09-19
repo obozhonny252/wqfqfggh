@@ -1,13 +1,13 @@
 -- ============================================================
--- OBJECT TRACKER v3.1 - SKYFIRE edition
+-- OBJECT TRACKER v3.2 - SKYFIRE edition
 -- ============================================================
 
 local Rayfield
 do
     local mirrors = {
-        {name = "sirius",    url = "https://sirius.menu/rayfield"},
-        {name = "shlexware", url = "https://raw.githubusercontent.com/shlexware/Rayfield/main/source"},
-        {name = "jsdelivr",  url = "https://cdn.jsdelivr.net/gh/shlexware/Rayfield@main/source.lua"},
+        {name="sirius",    url="https://sirius.menu/rayfield"},
+        {name="shlexware", url="https://raw.githubusercontent.com/shlexware/Rayfield/main/source"},
+        {name="jsdelivr",  url="https://cdn.jsdelivr.net/gh/shlexware/Rayfield@main/source.lua"},
     }
     for _, m in ipairs(mirrors) do
         local ok, result = pcall(function()
@@ -15,17 +15,10 @@ do
             if not src or #src < 100 then error("empty") end
             return loadstring(src)()
         end)
-        if ok and result then
-            Rayfield = result
-            print("[OT] Rayfield loaded: " .. m.name)
-            break
-        end
+        if ok and result then Rayfield = result break end
     end
 end
-if not Rayfield then
-    warn("[OT] Rayfield не загрузился")
-    return
-end
+if not Rayfield then warn("[OT] Rayfield не загрузился"); return end
 
 local Players     = game:GetService("Players")
 local RunService  = game:GetService("RunService")
@@ -47,17 +40,30 @@ local CONFIG = {
         "kamikaze", "missile", "rocket",
     },
 
-    flyMinY          = 10,
-    maxSizeMagnitude = 60,
+    -- чёрный список — никогда не цепляем
+    blacklistKeywords = {
+        "tree", "bush", "rock", "plant", "grass", "foliage",
+        "leaf", "leaves", "trunk", "branch", "stone", "hill",
+        "mountain", "cloud", "sky", "fence", "wall", "road",
+        "terrain", "decal", "foliage", "shrub", "flower", "root",
+    },
+
+    -- допускаются только эти классы
+    allowedClasses = {
+        MeshPart = true,
+        Model    = true,
+    },
+
+    flyMinY          = 15,     -- высота, считается "в воздухе"
+    minSizeMagnitude = 1.5,    -- минимум размер (studs) — отсекает листву
+    maxSizeMagnitude = 25,     -- максимум — отсекает деревья
 
     outlineColor        = Color3.fromRGB(255, 80, 80),
     outlineTransparency = 0,
     fillTransparency    = 1,
     showOutline         = true,
 
-    -- удалять обводку если объект упал ниже этой высоты (земля)
     groundY = 5,
-
     updateHz = 20,
 }
 
@@ -78,7 +84,54 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false,
 })
 
--- -------------------- MAIN --------------------
+-- ---------------- HELPERS (declared early) ----------------
+function getPosSize(obj)
+    if obj:IsA("BasePart") then
+        return obj.Position, obj.Size.Magnitude
+    elseif obj:IsA("Model") then
+        local ok, cf, sz = pcall(function()
+            local c, s = obj:GetBoundingBox(); return c, s
+        end)
+        if ok and cf and sz then return cf.Position, sz.Magnitude end
+        return obj:GetPivot().Position, 5
+    end
+    return nil, 0
+end
+
+local function hasBlacklistedName(name)
+    local l = name:lower()
+    for _, w in ipairs(CONFIG.blacklistKeywords) do
+        if string.find(l, w, 1, true) then return true end
+    end
+    return false
+end
+
+local function classAllowed(obj)
+    return CONFIG.allowedClasses[obj.ClassName] == true
+end
+
+local function isLikelyDrone(obj)
+    if not classAllowed(obj) then return false, nil end
+    if hasBlacklistedName(obj.Name) then return false, nil end
+    local pos, size = getPosSize(obj)
+    if not pos then return false, nil end
+    if size < CONFIG.minSizeMagnitude then return false, nil end
+    if size > CONFIG.maxSizeMagnitude then return false, nil end
+    if pos.Y < CONFIG.flyMinY then return false, nil end
+    return true, pos, size
+end
+
+function nameMatchesPattern(name, p)
+    if p.match == "exact" then
+        return name == p.id
+    elseif p.match == "contains" then
+        return string.find(name:lower(), p.id:lower(), 1, true) ~= nil
+    else
+        return string.sub(name, 1, #p.id):lower() == p.id:lower()
+    end
+end
+
+-- ---------------- MAIN TAB ----------------
 local MainTab = Window:CreateTab("Main", nil)
 
 MainTab:CreateSection("Distance")
@@ -86,8 +139,7 @@ MainTab:CreateSection("Distance")
 MainTab:CreateSlider({
     Name = "Max distance",
     Range = {CONFIG.minDistance, CONFIG.maxDistance},
-    Increment = 50,
-    Suffix = "m",
+    Increment = 50, Suffix = "m",
     CurrentValue = CONFIG.startDistance,
     Flag = "Distance",
     Callback = function(v) currentDistance = v end,
@@ -96,21 +148,15 @@ MainTab:CreateSlider({
 MainTab:CreateSection("Tracking mode")
 
 MainTab:CreateToggle({
-    Name = "Track ALL flying objects (ignore name)",
+    Name = "Track ALL flying objects (strict filter)",
     CurrentValue = false,
     Flag = "TrackAllFlying",
     Callback = function(v)
         trackAllFlying = v
         if v then
-            -- сразу просканировать всё что летит
             for _, obj in ipairs(workspace:GetDescendants()) do
-                if obj:IsA("BasePart") or obj:IsA("Model") then
-                    local pos, size = getPosSize(obj)
-                    if pos and pos.Y >= CONFIG.flyMinY
-                       and size > 0 and size <= CONFIG.maxSizeMagnitude then
-                        addTracked(obj, obj.Name)
-                    end
-                end
+                local ok, pos = isLikelyDrone(obj)
+                if ok then addTracked(obj, obj.Name) end
             end
         end
     end,
@@ -119,8 +165,7 @@ MainTab:CreateToggle({
 MainTab:CreateSection("Auto scan")
 
 local ScanStatus = MainTab:CreateParagraph({
-    Title = "Scan",
-    Content = "Not scanned yet.",
+    Title = "Scan", Content = "Not scanned yet.",
 })
 
 local ExtraKeywords = MainTab:CreateInput({
@@ -146,31 +191,25 @@ MainTab:CreateButton({
     Callback = function()
         if scanRunning then return end
         scanRunning = true
-        ScanStatus:Set({ Title = "Scan", Content = "Scanning..." })
+        ScanStatus:Set({Title = "Scan", Content = "Scanning..."})
         task.wait(0.05)
 
         local kwList = getAllKeywords()
         local groups, total = {}, 0
 
         for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") or obj:IsA("Model") then
-                local pos, size = getPosSize(obj)
-                if pos and size > 0 and size <= CONFIG.maxSizeMagnitude
-                   and pos.Y >= CONFIG.flyMinY then
-                    local name = obj.Name:lower()
-                    local matched = false
-                    for _, kw in ipairs(kwList) do
-                        if string.find(name, kw, 1, true) then
-                            matched = true
-                            break
-                        end
-                    end
-                    if matched then
-                        local base = obj.Name:gsub("%d+$", ""):gsub("[_%-%.]%d+$", "")
-                        if base ~= "" then
-                            groups[base] = (groups[base] or 0) + 1
-                            total = total + 1
-                        end
+            local ok, pos, size = isLikelyDrone(obj)
+            if ok then
+                local name = obj.Name:lower()
+                local matched = false
+                for _, kw in ipairs(kwList) do
+                    if string.find(name, kw, 1, true) then matched = true break end
+                end
+                if matched then
+                    local base = obj.Name:gsub("%d+$",""):gsub("[_%-%.]%d+$","")
+                    if base ~= "" then
+                        groups[base] = (groups[base] or 0) + 1
+                        total = total + 1
                     end
                 end
             end
@@ -183,33 +222,27 @@ MainTab:CreateButton({
                 if p.id == base then exists = true break end
             end
             if not exists then
-                table.insert(patterns, {id = base, match = "prefix", displayName = base})
+                table.insert(patterns, {id=base, match="prefix", displayName=base})
             end
             table.insert(lines, string.format("%s (%d)", base, count))
         end
 
         for _, p in ipairs(patterns) do
             for _, obj in ipairs(workspace:GetDescendants()) do
-                if (obj:IsA("BasePart") or obj:IsA("Model")) and not tracked[obj] then
-                    if nameMatchesPattern(obj.Name, p) then
-                        addTracked(obj, p.displayName or obj.Name)
-                    end
+                if not tracked[obj] and isLikelyDrone(obj) and nameMatchesPattern(obj.Name, p) then
+                    addTracked(obj, p.displayName or obj.Name)
                 end
             end
         end
 
         if #lines == 0 then
-            ScanStatus:Set({
-                Title = "Scan - nothing found",
-                Content = "Попробуй включить 'Track ALL flying objects'.",
-            })
+            ScanStatus:Set({Title="Scan - nothing found",
+                Content="Включи Track ALL или добавь keywords."})
         else
             table.sort(lines)
             table.insert(lines, 1, "Total: " .. total)
-            ScanStatus:Set({
-                Title = "Scan - " .. #groups .. " groups",
-                Content = table.concat(lines, "\n"),
-            })
+            ScanStatus:Set({Title="Scan - "..#groups.." groups",
+                Content=table.concat(lines,"\n")})
         end
         scanRunning = false
     end,
@@ -218,8 +251,7 @@ MainTab:CreateButton({
 MainTab:CreateSection("Debug")
 
 local NearbyParagraph = MainTab:CreateParagraph({
-    Title = "Nearby (0)",
-    Content = "Нажми когда рядом дрон.",
+    Title = "Nearby (0)", Content = "Нажми когда рядом дрон.",
 })
 
 MainTab:CreateButton({
@@ -228,7 +260,7 @@ MainTab:CreateButton({
         local char = LocalPlayer.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if not root then
-            NearbyParagraph:Set({Title = "Nearby", Content = "No character."})
+            NearbyParagraph:Set({Title="Nearby", Content="No character."})
             return
         end
         local pp = root.Position
@@ -240,28 +272,24 @@ MainTab:CreateButton({
                     local dist = (pos - pp).Magnitude
                     if dist <= 200 and size <= 100 then
                         table.insert(rows, {
-                            name  = obj.Name,
-                            class = obj.ClassName,
-                            dist  = dist,
-                            y     = pos.Y,
+                            name=obj.Name, class=obj.ClassName,
+                            dist=dist, y=pos.Y, size=size,
                         })
                     end
                 end
             end
         end
-        table.sort(rows, function(a, b) return a.dist < b.dist end)
+        table.sort(rows, function(a,b) return a.dist < b.dist end)
         local lines = {}
         local limit = math.min(#rows, 25)
         for i = 1, limit do
             local r = rows[i]
-            table.insert(lines, string.format("%s | %s | %.0fm | Y=%.0f",
-                r.class, r.name, r.dist, r.y))
+            table.insert(lines, string.format("%s|%s|%.0fm|Y=%.0f|S=%.1f",
+                r.class, r.name, r.dist, r.y, r.size))
         end
         if #rows == 0 then lines = {"Nothing within 200m."} end
-        NearbyParagraph:Set({
-            Title = "Nearby (" .. #rows .. ")",
-            Content = table.concat(lines, "\n"),
-        })
+        NearbyParagraph:Set({Title="Nearby ("..#rows..")",
+            Content=table.concat(lines,"\n")})
     end,
 })
 
@@ -271,20 +299,19 @@ MainTab:CreateButton({
         for _, data in pairs(tracked) do
             if data.highlight then pcall(function() data.highlight:Destroy() end) end
         end
-        tracked  = {}
+        tracked = {}
         patterns = {}
-        ScanStatus:Set({Title = "Scan", Content = "Cleared."})
+        ScanStatus:Set({Title="Scan", Content="Cleared."})
     end,
 })
 
 MainTab:CreateSection("Tracked list")
 
 local ListParagraph = MainTab:CreateParagraph({
-    Title = "Tracked (0)",
-    Content = "Nothing yet.",
+    Title = "Tracked (0)", Content = "Nothing yet.",
 })
 
--- -------------------- SETTINGS --------------------
+-- ---------------- SETTINGS TAB ----------------
 local SettingsTab = Window:CreateTab("Settings", nil)
 
 SettingsTab:CreateSection("Outline")
@@ -315,9 +342,7 @@ SettingsTab:CreateColorPicker({
 
 SettingsTab:CreateSlider({
     Name = "Outline transparency",
-    Range = {0, 1},
-    Increment = 0.05,
-    Suffix = "",
+    Range = {0, 1}, Increment = 0.05, Suffix = "",
     CurrentValue = CONFIG.outlineTransparency,
     Flag = "OutlineTransparency",
     Callback = function(v)
@@ -328,23 +353,27 @@ SettingsTab:CreateSlider({
     end,
 })
 
-SettingsTab:CreateSection("Filter")
+SettingsTab:CreateSection("Filters")
 
 SettingsTab:CreateSlider({
     Name = "Min Y (flying threshold)",
-    Range = {0, 200},
-    Increment = 5,
-    Suffix = " studs",
+    Range = {0, 200}, Increment = 5, Suffix = " studs",
     CurrentValue = CONFIG.flyMinY,
     Flag = "FlyMinY",
     Callback = function(v) CONFIG.flyMinY = v end,
 })
 
 SettingsTab:CreateSlider({
+    Name = "Min object size",
+    Range = {0, 20}, Increment = 0.5, Suffix = " studs",
+    CurrentValue = CONFIG.minSizeMagnitude,
+    Flag = "MinSize",
+    Callback = function(v) CONFIG.minSizeMagnitude = v end,
+})
+
+SettingsTab:CreateSlider({
     Name = "Max object size",
-    Range = {10, 200},
-    Increment = 5,
-    Suffix = " studs",
+    Range = {10, 200}, Increment = 5, Suffix = " studs",
     CurrentValue = CONFIG.maxSizeMagnitude,
     Flag = "MaxSize",
     Callback = function(v) CONFIG.maxSizeMagnitude = v end,
@@ -352,9 +381,7 @@ SettingsTab:CreateSlider({
 
 SettingsTab:CreateSlider({
     Name = "Ground Y (remove below)",
-    Range = {0, 50},
-    Increment = 1,
-    Suffix = " studs",
+    Range = {0, 50}, Increment = 1, Suffix = " studs",
     CurrentValue = CONFIG.groundY,
     Flag = "GroundY",
     Callback = function(v) CONFIG.groundY = v end,
@@ -364,8 +391,8 @@ SettingsTab:CreateSlider({
 -- HIGHLIGHT
 -- ============================================================
 local drawGui = Instance.new("ScreenGui")
-drawGui.Name           = "ObjectTracker_HL"
-drawGui.ResetOnSpawn   = false
+drawGui.Name = "ObjectTracker_HL"
+drawGui.ResetOnSpawn = false
 drawGui.IgnoreGuiInset = true
 drawGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 pcall(function() drawGui.Parent = game:GetService("CoreGui") end)
@@ -376,13 +403,13 @@ end
 local function createHighlight(inst)
     if not CONFIG.showOutline then return nil end
     local hl = Instance.new("Highlight")
-    hl.Name                 = "OT_HL"
-    hl.Adornee              = inst
-    hl.FillTransparency     = CONFIG.fillTransparency
-    hl.OutlineColor         = CONFIG.outlineColor
-    hl.OutlineTransparency  = CONFIG.outlineTransparency
-    hl.DepthMode            = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.Parent               = drawGui
+    hl.Name = "OT_HL"
+    hl.Adornee = inst
+    hl.FillTransparency = CONFIG.fillTransparency
+    hl.OutlineColor = CONFIG.outlineColor
+    hl.OutlineTransparency = CONFIG.outlineTransparency
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Parent = drawGui
     return hl
 end
 
@@ -406,66 +433,30 @@ local function removeTracked(inst)
 end
 
 -- ============================================================
--- HELPERS
+-- IS DESTROYED (упавшие/мёртвые)
 -- ============================================================
-function getPosSize(obj)
-    if obj:IsA("BasePart") then
-        return obj.Position, obj.Size.Magnitude
-    elseif obj:IsA("Model") then
-        local ok, cf, sz = pcall(function()
-            local c, s = obj:GetBoundingBox()
-            return c, s
-        end)
-        if ok and cf and sz then return cf.Position, sz.Magnitude end
-        return obj:GetPivot().Position, 5
-    end
-    return nil, 0
-end
-
-function nameMatchesPattern(name, p)
-    if p.match == "exact" then
-        return name == p.id
-    elseif p.match == "contains" then
-        return string.find(name:lower(), p.id:lower(), 1, true) ~= nil
-    else
-        return string.sub(name, 1, #p.id):lower() == p.id:lower()
-    end
-end
-
--- Проверка "мертвяк ли это"
 local function isDestroyed(obj)
-    -- 1) упал на землю
     local pos = getPosSize(obj)
     if pos and pos.Y < CONFIG.groundY then return true end
-
-    -- 2) Humanoid мёртв
     if obj:IsA("Model") then
         local hum = obj:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health <= 0 then return true end
-
-        -- 3) атрибут Destroyed
-        local ok, val = pcall(function() return obj:GetAttribute("Destroyed") end)
-        if ok and val == true then return true end
-
-        local ok2, val2 = pcall(function() return obj:GetAttribute("dead") end)
-        if ok2 and val2 == true then return true end
-
-        -- 4) HasTag
+        local ok, v = pcall(function() return obj:GetAttribute("Destroyed") end)
+        if ok and v == true then return true end
+        local ok2, v2 = pcall(function() return obj:GetAttribute("dead") end)
+        if ok2 and v2 == true then return true end
         if obj:HasTag("Destroyed") or obj:HasTag("Dead") then return true end
     end
-
     return false
 end
 
 -- ============================================================
--- TRACKED LIST + CLEANUP OF DEAD DRONES
+-- LIST + CLEANUP
 -- ============================================================
 task.spawn(function()
     while true do
         task.wait(0.4)
-
-        -- удаляем мёртвых
-        for inst, _ in pairs(tracked) do
+        for inst in pairs(tracked) do
             if not inst.Parent or not inst:IsDescendantOf(workspace) then
                 removeTracked(inst)
             elseif isDestroyed(inst) then
@@ -476,7 +467,7 @@ task.spawn(function()
         local char = LocalPlayer.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if not root then
-            ListParagraph:Set({Title = "Tracked (0)", Content = "No character."})
+            ListParagraph:Set({Title="Tracked (0)", Content="No character."})
         else
             local pp = root.Position
             local rows, count = {}, 0
@@ -490,7 +481,7 @@ task.spawn(function()
                     })
                 end
             end
-            table.sort(rows, function(a, b) return a.dist < b.dist end)
+            table.sort(rows, function(a,b) return a.dist < b.dist end)
             local lines = {}
             local limit = math.min(#rows, 20)
             for i = 1, limit do
@@ -499,36 +490,28 @@ task.spawn(function()
                 table.insert(lines, string.format("%s%s - %.0fm", mark, r.name, r.dist))
             end
             if #rows > limit then
-                table.insert(lines, "... +" .. (#rows - limit) .. " more")
+                table.insert(lines, "... +"..(#rows-limit).." more")
             end
             if #lines == 0 then lines = {"Nothing tracked."} end
-            ListParagraph:Set({
-                Title = "Tracked (" .. count .. ")",
-                Content = table.concat(lines, "\n"),
-            })
+            ListParagraph:Set({Title="Tracked ("..count..")",
+                Content=table.concat(lines,"\n")})
         end
     end
 end)
 
 -- ============================================================
--- AUTO-PICKUP НОВЫХ
+-- AUTO-PICKUP
 -- ============================================================
 local function checkAndAdd(obj)
     if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
     if tracked[obj] then return end
+    local ok = isLikelyDrone(obj)
+    if not ok then return end
 
-    local pos, size = getPosSize(obj)
-    if not pos or size <= 0 or size > CONFIG.maxSizeMagnitude then return end
-
-    -- режим "всё что летит"
     if trackAllFlying then
-        if pos.Y >= CONFIG.flyMinY then
-            addTracked(obj, obj.Name)
-        end
+        addTracked(obj, obj.Name)
         return
     end
-
-    -- обычный режим по patterns
     for _, p in ipairs(patterns) do
         if nameMatchesPattern(obj.Name, p) then
             addTracked(obj, p.displayName or obj.Name)
@@ -540,7 +523,7 @@ end
 workspace.DescendantAdded:Connect(checkAndAdd)
 
 -- ============================================================
--- CLEANUP LOOP
+-- HEARTBEAT CLEANUP
 -- ============================================================
 local updateInterval = 1 / CONFIG.updateHz
 local accumulator = 0
@@ -550,7 +533,7 @@ RunService.Heartbeat:Connect(function(dt)
     if accumulator < updateInterval then return end
     accumulator = 0
 
-    for inst, _ in pairs(tracked) do
+    for inst in pairs(tracked) do
         if not inst.Parent or not inst:IsDescendantOf(workspace) then
             removeTracked(inst)
         elseif isDestroyed(inst) then
@@ -558,15 +541,10 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- если включён trackAllFlying — периодически подхватываем новые летящие
     if trackAllFlying then
         for _, obj in ipairs(workspace:GetDescendants()) do
-            if (obj:IsA("BasePart") or obj:IsA("Model")) and not tracked[obj] then
-                local pos, size = getPosSize(obj)
-                if pos and pos.Y >= CONFIG.flyMinY
-                   and size > 0 and size <= CONFIG.maxSizeMagnitude then
-                    addTracked(obj, obj.Name)
-                end
+            if not tracked[obj] and isLikelyDrone(obj) then
+                addTracked(obj, obj.Name)
             end
         end
     end
@@ -576,32 +554,27 @@ end)
 -- INIT
 -- ============================================================
 for _, kw in ipairs(CONFIG.droneKeywords) do
-    table.insert(patterns, {id = kw, match = "contains", displayName = kw})
+    table.insert(patterns, {id=kw, match="contains", displayName=kw})
 end
 
 task.spawn(function()
     task.wait(1)
     local found = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local pos, size = getPosSize(obj)
-            if pos and pos.Y >= CONFIG.flyMinY and size <= CONFIG.maxSizeMagnitude then
-                for _, p in ipairs(patterns) do
-                    if nameMatchesPattern(obj.Name, p) then
-                        addTracked(obj, p.displayName or obj.Name)
-                        found[p.id] = true
-                        break
-                    end
+        if not tracked[obj] and isLikelyDrone(obj) then
+            for _, p in ipairs(patterns) do
+                if nameMatchesPattern(obj.Name, p) then
+                    addTracked(obj, p.displayName or obj.Name)
+                    found[p.id] = true
+                    break
                 end
             end
         end
     end
     local c = 0
     for _ in pairs(found) do c = c + 1 end
-    ScanStatus:Set({
-        Title = "Auto-scan on start",
-        Content = "Found " .. c .. " groups.",
-    })
+    ScanStatus:Set({Title="Auto-scan on start",
+        Content="Found "..c.." groups."})
 end)
 
 Rayfield:Notify({
@@ -610,4 +583,4 @@ Rayfield:Notify({
     Duration = 4,
 })
 
-print("[ObjectTracker v3.1] ready")
+print("[ObjectTracker v3.2] ready")
