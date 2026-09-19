@@ -1,31 +1,72 @@
 -- ============================================================
--- OBJECT TRACKER v2.1 - Highlight outline + auto-scan
--- Игра: SKYFIRE [BETA]
+-- OBJECT TRACKER v2.1 - SKYFIRE edition
 -- ============================================================
 
+-- ============================================================
+-- ЗАГРУЗЧИК RAYFIELD (усиленный)
+-- ============================================================
 local Rayfield
-do
-    local ok, res = pcall(function()
-        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local function tryLoad(name, url)
+    local ok, result = pcall(function()
+        local src = game:HttpGet(url)
+        if not src or #src < 100 then
+            error("пустой ответ (" .. tostring(#src or 0) .. " байт)")
+        end
+        if string.find(src, "<html", 1, true) or string.find(src, "<!DOCTYPE", 1, true) then
+            error("вернулся HTML вместо Lua")
+        end
+        local fn = loadstring(src)
+        if not fn then error("loadstring вернул nil") end
+        return fn()
     end)
-    if ok and res then
-        Rayfield = res
+    if ok and result then
+        print("[ObjectTracker] Rayfield загружен через: " .. name)
+        return result
     else
-        local ok2, res2 = pcall(function()
-            return loadstring(game:HttpGet(
-                "https://raw.githubusercontent.com/shlexware/Rayfield/main/source"
-            ))()
-        end)
-        if ok2 then Rayfield = res2 end
+        warn("[ObjectTracker] Не удалось (" .. name .. "): " .. tostring(result))
+        return nil
     end
 end
+
+if type(game.HttpGet) ~= "function" then
+    warn("[ObjectTracker] game:HttpGet не поддерживается этим экзекьютором")
+end
+if type(loadstring) ~= "function" then
+    warn("[ObjectTracker] loadstring не поддерживается")
+end
+
+Rayfield = tryLoad("sirius.menu", "https://sirius.menu/rayfield")
 if not Rayfield then
-    warn("[ObjectTracker] Rayfield не загрузился")
+    Rayfield = tryLoad("github shlexware",
+        "https://raw.githubusercontent.com/shlexware/Rayfield/main/source")
+end
+if not Rayfield then
+    Rayfield = tryLoad("github LOLTeam",
+        "https://raw.githubusercontent.com/lolteam/Rayfield/main/source.lua")
+end
+if not Rayfield then
+    Rayfield = tryLoad("jsdelivr",
+        "https://cdn.jsdelivr.net/gh/shlexware/Rayfield@main/source.lua")
+end
+
+if not Rayfield then
+    warn("[ObjectTracker] Не удалось загрузить Rayfield ни с одного зеркала.")
     return
 end
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
+if type(Rayfield) ~= "table" or type(Rayfield.CreateWindow) ~= "function" then
+    warn("[ObjectTracker] Rayfield загрузился, но структура повреждена")
+    return
+end
+
+print("[ObjectTracker] Rayfield готов к работе")
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then return end
@@ -38,23 +79,16 @@ local CONFIG = {
     maxDistance   = 5000,
     startDistance = 1000,
 
-    -- Ключевые слова для авто-скана. Ищем по ПОДСТРОКЕ в имени.
-    -- Регистр не важен.
     droneKeywords = {
-        -- из меню RECON игры
         "vespa", "vector", "varan", "fpv", "kp-1", "kp1", "predator",
-
-        -- пропеллеры (главная фишка — есть на всех дронах)
         "propeller", "prop", "rotor", "blade", "engine",
-
-        -- общие термины дронов
         "drone", "uav", "bpla", "recon",
         "shahed", "shahid", "geran", "lancet", "orlan",
         "kamikaze", "missile", "rocket", "aircraft", "plane",
     },
 
-    flyMinY          = 10,    -- min высота (studs), чтобы считать объект летающим
-    maxSizeMagnitude = 60,    -- max размер (studs), чтобы не рисовать ландшафт
+    flyMinY          = 10,
+    maxSizeMagnitude = 60,
 
     outlineColor        = Color3.fromRGB(255, 80, 80),
     outlineTransparency = 0,
@@ -70,12 +104,12 @@ local tracked         = {}
 local scanRunning     = false
 
 -- ============================================================
--- RAYFIELD UI
+-- RAYFIELD WINDOW
 -- ============================================================
 local Window = Rayfield:CreateWindow({
     Name = "Object Tracker",
     LoadingTitle = "Object Tracker",
-    LoadingSubtitle = "SKYFIRE edition",
+    LoadingSubtitle = "SKYFIRE",
     ConfigurationSaving = { Enabled = false },
     KeySystem = false,
 })
@@ -103,7 +137,7 @@ local ScanStatus = MainTab:CreateParagraph({
 
 local ExtraKeywords = MainTab:CreateInput({
     Name = "Additional keywords (comma separated)",
-    PlaceholderText = "e.g. krot, ugv, tank",
+    PlaceholderText = "e.g. krot, ugv",
     RemoveTextAfterFocusLost = false,
     Flag = "ExtraKeywords",
     Callback = function() end,
@@ -117,7 +151,6 @@ MainTab:CreateButton({
         ScanStatus:Set({ Title = "Scan", Content = "Scanning..." })
         task.wait(0.05)
 
-        -- собираем все ключевые слова
         local allKeywords = {}
         for _, k in ipairs(CONFIG.droneKeywords) do table.insert(allKeywords, k) end
         for w in string.gmatch(ExtraKeywords.Value or "", "[^,]+") do
@@ -165,7 +198,6 @@ MainTab:CreateButton({
             end
         end
 
-        -- добавляем найденные базы в patterns
         local lines = {}
         for base, count in pairs(groups) do
             local exists = false
@@ -178,7 +210,6 @@ MainTab:CreateButton({
             table.insert(lines, string.format("%s (%d)", base, count))
         end
 
-        -- сразу трекаем всё по всем patterns
         for _, p in ipairs(patterns) do
             for _, obj in ipairs(workspace:GetDescendants()) do
                 if (obj:IsA("BasePart") or obj:IsA("Model")) and not tracked[obj] then
@@ -218,7 +249,7 @@ MainTab:CreateSection("Manual add")
 
 local ManualInput = MainTab:CreateInput({
     Name = "Add by name/prefix",
-    PlaceholderText = "Geran, Varan, ...",
+    PlaceholderText = "Geran, Varan...",
     RemoveTextAfterFocusLost = false,
     Flag = "ManualInput",
     Callback = function() end,
@@ -246,7 +277,7 @@ local ListParagraph = MainTab:CreateParagraph({
 })
 
 -- ============================================================
--- SETTINGS
+-- SETTINGS TAB
 -- ============================================================
 local SettingsTab = Window:CreateTab("Settings", nil)
 
@@ -314,16 +345,14 @@ SettingsTab:CreateSlider({
 })
 
 -- ============================================================
--- HIGHLIGHT + TRACKER
+-- HIGHLIGHT
 -- ============================================================
 local drawGui = Instance.new("ScreenGui")
 drawGui.Name = "ObjectTracker_HL"
 drawGui.ResetOnSpawn = false
 drawGui.IgnoreGuiInset = true
 drawGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-pcall(function()
-    drawGui.Parent = game:GetService("CoreGui")
-end)
+pcall(function() drawGui.Parent = game:GetService("CoreGui") end)
 if not drawGui.Parent then
     drawGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 end
@@ -366,7 +395,6 @@ task.spawn(function()
         else
             local playerPos = root.Position
             local rows, count = {}, 0
-
             for inst, data in pairs(tracked) do
                 if not inst.Parent then
                     if data.highlight then data.highlight:Destroy() end
@@ -386,9 +414,7 @@ task.spawn(function()
                                          dist = (pos - playerPos).Magnitude })
                 end
             end
-
             table.sort(rows, function(a, b) return a.dist < b.dist end)
-
             local lines = {}
             local limit = math.min(#rows, 20)
             for i = 1, limit do
@@ -400,7 +426,6 @@ task.spawn(function()
                 table.insert(lines, "... +" .. (#rows - limit) .. " more")
             end
             if #lines == 0 then lines = { "Nothing tracked." } end
-
             ListParagraph:Set({
                 Title = "Tracked (" .. count .. ")",
                 Content = table.concat(lines, "\n"),
@@ -410,7 +435,7 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- AUTO-PICKUP (новые объекты)
+-- AUTO-PICKUP
 -- ============================================================
 local function nameMatchesAnyPattern(name)
     for _, p in ipairs(patterns) do
@@ -428,8 +453,6 @@ end
 local function checkAndAdd(obj)
     if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
     if tracked[obj] then return end
-
-    -- фильтр размера
     local size = 0
     if obj:IsA("BasePart") then
         size = obj.Size.Magnitude
@@ -441,7 +464,6 @@ local function checkAndAdd(obj)
         if ok and sz then size = sz.Magnitude end
     end
     if size > CONFIG.maxSizeMagnitude then return end
-
     local p = nameMatchesAnyPattern(obj.Name)
     if p then addTracked(obj, p.displayName or obj.Name) end
 end
@@ -467,13 +489,12 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 -- ============================================================
--- ИНИЦИАЛИЗАЦИЯ: pattern по всем ключевым словам
+-- INIT
 -- ============================================================
 for _, kw in ipairs(CONFIG.droneKeywords) do
     table.insert(patterns, { id = kw, match = "contains", displayName = kw })
 end
 
--- Автос‑скан при старте
 task.spawn(function()
     task.wait(1)
     local found = {}
