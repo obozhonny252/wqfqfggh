@@ -1,51 +1,67 @@
 -- ============================================================
--- OBJECT TRACKER v9.1 - SKYFIRE auto edition (fix)
+-- OBJECT TRACKER v10 - SKYFIRE auto edition (robust loader + fallback UI)
 -- ============================================================
-
-print("[OT] v9.1 stage 1: Rayfield loader")
-
-local Rayfield = rawget(_G, "Rayfield")
-if Rayfield then
-    print("[OT] reusing _G.Rayfield")
-else
-    local mirrors = {
-        "https://sirius.menu/rayfield",
-        "https://raw.githubusercontent.com/shlexware/Rayfield/main/source.lua",
-        "https://cdn.jsdelivr.net/gh/shlexware/Rayfield@main/source.lua",
-        "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
-    }
-    for i, url in ipairs(mirrors) do
-        print("[OT] mirror "..i..": "..url)
-        local ok, result = pcall(function()
-            local src = game:HttpGet(url)
-            if not src or #src < 100 then error("empty response") end
-            local fn, err = loadstring(src)
-            if not fn then error("loadstring: "..tostring(err)) end
-            return fn()
-        end)
-        if ok and type(result) == "table" then
-            Rayfield = result
-            print("[OT] Rayfield loaded OK from mirror "..i)
-            break
-        else
-            warn("[OT] mirror "..i.." failed: "..tostring(result))
-        end
-    end
-end
-
-if not Rayfield then
-    warn("[OT] Rayfield не загрузился ни с одного зеркала. Проверь интернет/executor.")
-    return
-end
-rawset(_G, "Rayfield", Rayfield)
+print("[OT][1] start")
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local CoreGui          = game:GetService("CoreGui")
 local LocalPlayer      = Players.LocalPlayer
-if not LocalPlayer then warn("[OT] нет LocalPlayer"); return end
+if not LocalPlayer then warn("[OT] no LocalPlayer"); return end
 
-print("[OT] stage 2: config")
+-- ============================================================
+-- HTTP GET с таймаутом
+-- ============================================================
+local function httpGetTimeout(url, timeout)
+    timeout = timeout or 15
+    local done, result = false, nil
+    task.spawn(function()
+        local ok, res = pcall(function() return game:HttpGet(url, true) end)
+        if ok then result = res end
+        done = true
+    end)
+    local t0 = os.clock()
+    while not done and (os.clock() - t0) < timeout do
+        task.wait(0.1)
+    end
+    return done and result or nil
+end
+
+-- ============================================================
+-- Загрузка Rayfield
+-- ============================================================
+local Rayfield = rawget(_G, "Rayfield")
+if not Rayfield then
+    local mirrors = {
+        "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
+        "https://cdn.jsdelivr.net/gh/shlexware/Rayfield@main/source.lua",
+        "https://sirius.menu/rayfield",
+    }
+    for i, url in ipairs(mirrors) do
+        print("[OT][2] Rayfield mirror "..i..": "..url)
+        local src = httpGetTimeout(url, 15)
+        if src and #src > 500 and not src:find("<html", 1, true) then
+            local fn, lerr = loadstring(src)
+            if fn then
+                local ok, res = pcall(fn)
+                if ok and type(res) == "table" then
+                    Rayfield = res
+                    print("[OT][2] OK from mirror "..i.." (len="..#src..")")
+                    break
+                else
+                    warn("[OT][2] run err: "..tostring(res))
+                end
+            else
+                warn("[OT][2] loadstring err: "..tostring(lerr))
+            end
+        else
+            warn("[OT][2] mirror "..i.." bad/empty/HTML")
+        end
+    end
+end
+if Rayfield then rawset(_G, "Rayfield", Rayfield) end
+print("[OT][3] Rayfield available: "..tostring(Rayfield ~= nil))
 
 -- ============================================================
 -- CONFIG
@@ -119,7 +135,7 @@ local trackAllFlying  = false
 local extraKeywords   = {}
 
 -- ============================================================
--- WEAK CACHE
+-- CACHE
 -- ============================================================
 local posCache = setmetatable({}, {__mode = "k"})
 
@@ -151,7 +167,7 @@ local function getPosSize(obj)
 end
 
 -- ============================================================
--- BLACKLIST + COLLECT
+-- BLACKLIST / COLLECT
 -- ============================================================
 local function hasBlacklistedName(name)
     if type(name) ~= "string" then return true end
@@ -168,8 +184,7 @@ end
 local function collectDescendants(root, maxDepth, maxCount, applyBlacklist)
     maxDepth = maxDepth or CONFIG.nearbyDepth
     maxCount = maxCount or CONFIG.scanMaxCount
-    local result = {}
-    local count = 0
+    local result, count = {}, 0
     local function walk(node, depth)
         if count >= maxCount then return end
         local children = node:GetChildren()
@@ -177,13 +192,11 @@ local function collectDescendants(root, maxDepth, maxCount, applyBlacklist)
             if count >= maxCount then return end
             local child = children[i]
             if applyBlacklist and hasBlacklistedName(child.Name) then
-                -- skip whole subtree
+                -- skip subtree
             else
                 count = count + 1
                 result[count] = child
-                if depth < maxDepth then
-                    walk(child, depth + 1)
-                end
+                if depth < maxDepth then walk(child, depth + 1) end
             end
         end
     end
@@ -198,11 +211,9 @@ local function getGroundY()
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return nil end
-
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = {char}
-
     local result = workspace:Raycast(root.Position, Vector3.new(0, -500, 0), params)
     if result then return result.Position.Y end
     return nil
@@ -264,7 +275,6 @@ local function getOwnVehicle()
             ownVehicleCache.val = v
             return v
         end
-
         for _, d in ipairs(char:GetDescendants()) do
             if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
                 local p0, p1 = d.Part0, d.Part1
@@ -284,7 +294,6 @@ local function getOwnVehicle()
     local cam = workspace.CurrentCamera
     if cam then
         local subj = cam.CameraSubject
-
         if subj and subj:IsA("BasePart") then
             local insideChar = char and subj:IsDescendantOf(char)
             if not insideChar then
@@ -294,7 +303,6 @@ local function getOwnVehicle()
                 return v
             end
         end
-
         if subj and subj:IsA("Attachment") then
             local p = subj.Parent
             while p and p ~= workspace do
@@ -333,7 +341,6 @@ local function getPlayerPos()
         local cam = workspace.CurrentCamera
         if cam then pos = cam.CFrame.Position end
     end
-
     playerPosCache.val = pos
     return pos
 end
@@ -343,19 +350,15 @@ end
 -- ============================================================
 local function isDestroyed(obj)
     if not obj.Parent or not obj:IsDescendantOf(workspace) then return true end
-
     local pos = getPosSize(obj)
     if pos and pos.Y < CONFIG.groundY then return true end
-
     if obj:IsA("Model") then
         local hum = obj:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health <= 0 then return true end
-
         local ok, v = pcall(function() return obj:GetAttribute("Destroyed") end)
         if ok and v == true then return true end
         local ok2, v2 = pcall(function() return obj:GetAttribute("dead") end)
         if ok2 and v2 == true then return true end
-
         if obj:HasTag("Destroyed") or obj:HasTag("Dead") then return true end
     end
     return false
@@ -366,10 +369,8 @@ end
 -- ============================================================
 local function removeHighlightFrom(inst)
     if not inst then return end
-    local hl = inst:FindFirstChild("OT_HL")
-    if hl then hl:Destroy() end
-    local own = inst:FindFirstChild("OT_OwnHL")
-    if own then own:Destroy() end
+    local hl = inst:FindFirstChild("OT_HL"); if hl then hl:Destroy() end
+    local own = inst:FindFirstChild("OT_OwnHL"); if own then own:Destroy() end
 end
 
 local function createHighlightFor(inst, isOwn)
@@ -416,30 +417,25 @@ local function removeTracked(inst)
 end
 
 -- ============================================================
--- 2D DISTANCE LABELS
+-- 2D LABELS
 -- ============================================================
 local distGui
 local labelPool = {}
 
 task.spawn(function()
-    local ok, pg = pcall(function()
-        return LocalPlayer:WaitForChild("PlayerGui", 10)
-    end)
-    if not ok or not pg then
-        warn("[OT] PlayerGui not ready, labels disabled")
-        return
-    end
+    local ok, pg = pcall(function() return LocalPlayer:WaitForChild("PlayerGui", 10) end)
+    if not ok or not pg then warn("[OT] PlayerGui missing"); return end
     local sg = Instance.new("ScreenGui")
     sg.Name = "OT_DistGUI"
     sg.ResetOnSpawn = false
     sg.IgnoreGuiInset = true
     sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    sg.Parent = pg
+    pcall(function() sg.Parent = CoreGui end)
+    if not sg.Parent then sg.Parent = pg end
     distGui = sg
-
     for i = 1, CONFIG.labelPoolSize do
         local lbl = Instance.new("TextLabel")
-        lbl.Name = "OT_LBL_"..i
+        lbl.Name = "L"..i
         lbl.Size = UDim2.fromOffset(160, 16)
         lbl.AnchorPoint = Vector2.new(0.5, 1)
         lbl.BackgroundTransparency = 0.55
@@ -455,7 +451,7 @@ task.spawn(function()
         lbl.Parent = sg
         labelPool[i] = lbl
     end
-    print("[OT] distance labels ready")
+    print("[OT][4] labels ready")
 end)
 
 RunService.RenderStepped:Connect(function()
@@ -470,7 +466,6 @@ RunService.RenderStepped:Connect(function()
     local cam = workspace.CurrentCamera
     if not cam then return end
     local camPos = cam.CFrame.Position
-
     local idx = 1
     for inst, data in pairs(tracked) do
         if data.isActive and idx <= #labelPool then
@@ -496,225 +491,93 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ============================================================
--- RAYFIELD UI
+-- ЛОГИКА (общая для Rayfield и fallback)
 -- ============================================================
-print("[OT] stage 3: window")
+local StatusRef = {set = function() end}
+local TrackedRef = {set = function() end}
 
-local Window = Rayfield:CreateWindow({
-    Name = "Object Tracker v9.1",
-    LoadingTitle = "Object Tracker",
-    LoadingSubtitle = "SKYFIRE",
-    ConfigurationSaving = { Enabled = false },
-    KeySystem = false,
-})
+local function doAutoFind()
+    task.spawn(function()
+        StatusRef.set("Auto", "Detecting ground...")
+        task.wait(0.1)
+        updateAutoHeight()
+        trackAllFlying = true
 
-local MainTab = Window:CreateTab("Main", nil)
-
-MainTab:CreateSection("Auto")
-
-local AutoInfo = MainTab:CreateParagraph({
-    Title = "Status", Content = "Initializing...",
-})
-
-MainTab:CreateButton({
-    Name = ">>> AUTO FIND <<<",
-    Callback = function()
-        task.spawn(function()
-            AutoInfo:Set({Title = "Auto", Content = "Detecting ground..."})
-            task.wait(0.1)
-            updateAutoHeight()
-            trackAllFlying = true
-
-            for inst in pairs(tracked) do removeHighlightFrom(inst) end
-            tracked = {}
-            patterns = {}
-            for _, kw in ipairs(CONFIG.droneKeywords) do
-                table.insert(patterns, {id=kw, match="contains", displayName=kw})
-            end
-            for _, kw in ipairs(extraKeywords) do
-                table.insert(patterns, {id=kw, match="contains", displayName=kw})
-            end
-
-            AutoInfo:Set({
-                Title = "Auto",
-                Content = string.format("Ground Y: %.0f  FlyMin: %.0f\nScanning...",
-                    CONFIG.groundY, CONFIG.flyMinY)
-            })
-
-            local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
-                                           CONFIG.scanMaxCount, true)
-            local found = {}
-            local total = 0
-            local keyFPV, keyTopol = 0, 0
-
-            for _, obj in ipairs(all) do
-                if isLikelyDrone(obj) then
-                    local nm = string.lower(obj.Name)
-                    if string.find(nm, "fpv", 1, true) then keyFPV = keyFPV + 1 end
-                    if string.find(nm, "topol", 1, true) then keyTopol = keyTopol + 1 end
-
-                    local matched = nil
-                    for _, p in ipairs(patterns) do
-                        if nameMatchesPattern(obj.Name, p) then
-                            matched = p.id
-                            break
-                        end
-                    end
-                    if matched then
-                        addTracked(obj, obj.Name)
-                        found[matched] = (found[matched] or 0) + 1
-                        total = total + 1
-                    end
-                end
-            end
-
-            print(string.format("[OT] AUTO FIND: FPV=%d, Topol=%d, total=%d (scanned %d objs)",
-                keyFPV, keyTopol, total, #all))
-
-            local lines = {}
-            for k, v in pairs(found) do
-                table.insert(lines, k..": "..v)
-            end
-            table.sort(lines)
-
-            local header = string.format(
-                "Ground Y: %.0f  FlyMin: %.0f\nFPV=%d  Topol=%d  total=%d",
-                CONFIG.groundY, CONFIG.flyMinY, keyFPV, keyTopol, total)
-
-            if #lines == 0 then
-                AutoInfo:Set({
-                    Title = "Auto - nothing found",
-                    Content = header.."\nTrack ALL: ON. Wait for drones."
-                })
-            else
-                local chunk = {}
-                for i = 1, math.min(#lines, 20) do
-                    table.insert(chunk, lines[i])
-                end
-                AutoInfo:Set({
-                    Title = "Auto - found",
-                    Content = header.."\n"..table.concat(chunk, "\n")
-                })
-            end
-        end)
-    end,
-})
-
-MainTab:CreateSection("Distance")
-
-MainTab:CreateSlider({
-    Name = "Max distance",
-    Range = {100, 10000},
-    Increment = 50, Suffix = "m",
-    CurrentValue = CONFIG.startDistance,
-    Flag = "Distance",
-    Callback = function(v) currentDistance = v end,
-})
-
-MainTab:CreateSection("Tracking")
-
-MainTab:CreateToggle({
-    Name = "Track ALL flying",
-    CurrentValue = false,
-    Flag = "TrackAllFlying",
-    Callback = function(v)
-        trackAllFlying = v
-        if v then
-            task.spawn(function()
-                local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
-                                               CONFIG.scanMaxCount, true)
-                for _, obj in ipairs(all) do
-                    if isLikelyDrone(obj) then addTracked(obj, obj.Name) end
-                end
-            end)
+        for inst in pairs(tracked) do removeHighlightFrom(inst) end
+        tracked = {}
+        patterns = {}
+        for _, kw in ipairs(CONFIG.droneKeywords) do
+            table.insert(patterns, {id=kw, match="contains", displayName=kw})
         end
-    end,
-})
-
-MainTab:CreateInput({
-    Name = "Extra keywords (comma)",
-    PlaceholderText = "krot, ugv",
-    RemoveTextAfterFocusLost = false,
-    Flag = "ExtraKeywords",
-    Callback = function(text)
-        text = text or ""
-        extraKeywords = {}
-        for w in string.gmatch(text, "[^,%s]+") do
-            local lw = string.lower(w)
-            table.insert(extraKeywords, lw)
-            local exists = false
-            for _, p in ipairs(patterns) do
-                if p.id == lw then exists = true break end
-            end
-            if not exists then
-                table.insert(patterns, {id=lw, match="contains", displayName=lw})
-            end
+        for _, kw in ipairs(extraKeywords) do
+            table.insert(patterns, {id=kw, match="contains", displayName=kw})
         end
-    end,
-})
 
-MainTab:CreateButton({
-    Name = "Scan now",
-    Callback = function()
-        if scanRunning then return end
-        scanRunning = true
-        task.spawn(function()
-            local kwList = {}
-            for _, k in ipairs(CONFIG.droneKeywords) do table.insert(kwList, k) end
-            for _, k in ipairs(extraKeywords) do table.insert(kwList, k) end
+        StatusRef.set("Auto",
+            string.format("Ground Y: %.0f  FlyMin: %.0f\nScanning...",
+                CONFIG.groundY, CONFIG.flyMinY))
 
-            local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
-                                           CONFIG.scanMaxCount, true)
-            local groups, total = {}, 0
-            for _, obj in ipairs(all) do
-                if isLikelyDrone(obj) then
-                    local name = string.lower(obj.Name)
-                    for _, kw in ipairs(kwList) do
-                        if string.find(name, kw, 1, true) then
-                            local base = obj.Name:gsub("%d+$",""):gsub("[_%-%.]%d+$","")
-                            if base ~= "" then
-                                groups[base] = (groups[base] or 0) + 1
-                                total = total + 1
-                            end
-                            break
-                        end
-                    end
-                end
-            end
-            for base in pairs(groups) do
-                local exists = false
+        local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
+                                       CONFIG.scanMaxCount, true)
+        local found, total = {}, 0
+        local keyFPV, keyTopol = 0, 0
+
+        for _, obj in ipairs(all) do
+            if isLikelyDrone(obj) then
+                local nm = string.lower(obj.Name)
+                if string.find(nm, "fpv", 1, true) then keyFPV = keyFPV + 1 end
+                if string.find(nm, "topol", 1, true) then keyTopol = keyTopol + 1 end
+                local matched = nil
                 for _, p in ipairs(patterns) do
-                    if p.id == base then exists = true break end
+                    if nameMatchesPattern(obj.Name, p) then matched = p.id break end
                 end
-                if not exists then
-                    table.insert(patterns, {id=base, match="prefix", displayName=base})
-                end
-            end
-            for _, p in ipairs(patterns) do
-                for _, obj in ipairs(all) do
-                    if not tracked[obj] and isLikelyDrone(obj)
-                       and nameMatchesPattern(obj.Name, p) then
-                        addTracked(obj, p.displayName or obj.Name)
-                    end
+                if matched then
+                    addTracked(obj, obj.Name)
+                    found[matched] = (found[matched] or 0) + 1
+                    total = total + 1
                 end
             end
-            local lines = {}
-            for k, v in pairs(groups) do table.insert(lines, k..": "..v) end
-            table.sort(lines)
-            table.insert(lines, 1, "Total: "..total)
-            AutoInfo:Set({Title = "Scan", Content = table.concat(lines, "\n")})
-            scanRunning = false
+        end
+
+        print(string.format("[OT] AUTO FIND: FPV=%d Topol=%d total=%d scanned=%d",
+            keyFPV, keyTopol, total, #all))
+
+        local lines = {}
+        for k, v in pairs(found) do table.insert(lines, k..": "..v) end
+        table.sort(lines)
+        local header = string.format(
+            "Ground Y: %.0f  FlyMin: %.0f\nFPV=%d  Topol=%d  total=%d",
+            CONFIG.groundY, CONFIG.flyMinY, keyFPV, keyTopol, total)
+        if #lines == 0 then
+            StatusRef.set("Auto - nothing", header.."\nTrack ALL: ON")
+        else
+            local chunk = {}
+            for i = 1, math.min(#lines, 20) do table.insert(chunk, lines[i]) end
+            StatusRef.set("Auto - found", header.."\n"..table.concat(chunk, "\n"))
+        end
+    end)
+end
+
+local function doTrackAllToggle(v)
+    trackAllFlying = v
+    if v then
+        task.spawn(function()
+            local all = collectDescendants(workspace, CONFIG.nearbyDepth + 2,
+                                           CONFIG.scanMaxCount, true)
+            for _, obj in ipairs(all) do
+                if isLikelyDrone(obj) then addTracked(obj, obj.Name) end
+            end
         end)
-    end,
-})
+    end
+end
 
-MainTab:CreateSection("Debug")
+local function doClear()
+    for inst in pairs(tracked) do removeHighlightFrom(inst) end
+    tracked = {}
+    patterns = {}
+end
 
-local NearbyParagraph = MainTab:CreateParagraph({
-    Title = "Nearby (0)", Content = "F or button",
-})
-
-local function doNearbyScan()
+local function doNearby()
     task.spawn(function()
         local pp = getPlayerPos()
         if not pp then return end
@@ -728,10 +591,8 @@ local function doNearbyScan()
                 if pos and size then
                     local d = (pos - pp).Magnitude
                     if d <= radius then
-                        table.insert(rows, {
-                            name=obj.Name, class=obj.ClassName,
-                            dist=d, y=pos.Y, size=size,
-                        })
+                        table.insert(rows, {name=obj.Name, class=obj.ClassName,
+                            dist=d, y=pos.Y, size=size})
                     end
                 end
             end
@@ -744,181 +605,267 @@ local function doNearbyScan()
                 r.class, r.name, r.dist, r.y, r.size))
         end
         if #rows == 0 then lines = {"Nothing."} end
-        pcall(function()
-            NearbyParagraph:Set({
-                Title = "Nearby ("..#rows..") r="..radius.." scanned="..#all,
-                Content = table.concat(lines,"\n"),
-            })
-        end)
+        StatusRef.set("Nearby ("..#rows..") scanned="..#all, table.concat(lines,"\n"))
     end)
 end
 
-MainTab:CreateButton({
-    Name = "List nearby (F)",
-    Callback = doNearbyScan,
-})
+-- ============================================================
+-- UI: RAYFIELD ИЛИ FALLBACK
+-- ============================================================
+local UI_MODE = "none"
 
-MainTab:CreateButton({
-    Name = "Clear ALL",
-    Callback = function()
-        for inst in pairs(tracked) do removeHighlightFrom(inst) end
-        tracked = {}
-        patterns = {}
-    end,
-})
+if Rayfield then
+    UI_MODE = "rayfield"
+    print("[OT][5] building Rayfield UI")
+    local ok, err = pcall(function()
+        local Window = Rayfield:CreateWindow({
+            Name = "Object Tracker v10",
+            LoadingTitle = "Object Tracker",
+            LoadingSubtitle = "SKYFIRE",
+            ConfigurationSaving = { Enabled = false },
+            KeySystem = false,
+        })
+        local MainTab = Window:CreateTab("Main", nil)
+        MainTab:CreateSection("Auto")
+        local AutoInfo = MainTab:CreateParagraph({Title = "Status", Content = "Init..."})
+        StatusRef.set = function(t, c) pcall(function() AutoInfo:Set({Title=t, Content=c}) end) end
+        MainTab:CreateButton({Name = ">>> AUTO FIND <<<", Callback = doAutoFind})
+        MainTab:CreateSection("Distance")
+        MainTab:CreateSlider({Name="Max distance", Range={100,10000}, Increment=50,
+            Suffix="m", CurrentValue=CONFIG.startDistance, Flag="Dist",
+            Callback=function(v) currentDistance = v end})
+        MainTab:CreateSection("Tracking")
+        MainTab:CreateToggle({Name="Track ALL flying", CurrentValue=false, Flag="TA",
+            Callback = doTrackAllToggle})
+        MainTab:CreateInput({Name="Extra keywords (comma)", PlaceholderText="krot, ugv",
+            RemoveTextAfterFocusLost=false, Flag="EK",
+            Callback=function(text)
+                text = text or ""
+                extraKeywords = {}
+                for w in string.gmatch(text, "[^,%s]+") do
+                    local lw = string.lower(w)
+                    table.insert(extraKeywords, lw)
+                    local ex = false
+                    for _, p in ipairs(patterns) do
+                        if p.id == lw then ex = true break end
+                    end
+                    if not ex then
+                        table.insert(patterns, {id=lw, match="contains", displayName=lw})
+                    end
+                end
+            end})
+        MainTab:CreateButton({Name="Scan now", Callback=function() doAutoFind() end})
+        MainTab:CreateSection("Debug")
+        MainTab:CreateButton({Name="List nearby (F)", Callback=doNearby})
+        MainTab:CreateButton({Name="Clear ALL", Callback=doClear})
+        MainTab:CreateSection("Tracked list")
+        local ListP = MainTab:CreateParagraph({Title="Tracked (0)", Content="Nothing yet."})
+        TrackedRef.set = function(t, c) pcall(function() ListP:Set({Title=t, Content=c}) end) end
 
-MainTab:CreateSection("Tracked list")
+        local SettingsTab = Window:CreateTab("Settings", nil)
+        SettingsTab:CreateSection("Auto height")
+        SettingsTab:CreateToggle({Name="Auto height", CurrentValue=true, Flag="AH",
+            Callback=function(v) CONFIG.autoHeight = v end})
+        SettingsTab:CreateSlider({Name="Manual Min Y", Range={-500,500}, Increment=5,
+            Suffix=" studs", CurrentValue=CONFIG.flyMinY, Flag="FMY",
+            Callback=function(v) CONFIG.flyMinY = v; CONFIG.autoHeight = false end})
+        SettingsTab:CreateSlider({Name="Manual Ground Y", Range={-500,500}, Increment=5,
+            Suffix=" studs", CurrentValue=CONFIG.groundY, Flag="GY",
+            Callback=function(v) CONFIG.groundY = v; CONFIG.autoHeight = false end})
+        SettingsTab:CreateSection("Performance")
+        SettingsTab:CreateSlider({Name="Update Hz", Range={2,30}, Increment=1, Suffix=" Hz",
+            CurrentValue=CONFIG.updateHz, Flag="Hz",
+            Callback=function(v) CONFIG.updateHz = v end})
+        SettingsTab:CreateSlider({Name="Max active highlights", Range={5,30}, Increment=1,
+            CurrentValue=CONFIG.maxActiveHighlights, Flag="MAH",
+            Callback=function(v) CONFIG.maxActiveHighlights = v end})
+        SettingsTab:CreateSlider({Name="Max tracked objects", Range={20,200}, Increment=10,
+            CurrentValue=CONFIG.maxTracked, Flag="MT",
+            Callback=function(v) CONFIG.maxTracked = v end})
+        SettingsTab:CreateSlider({Name="Scan max objects", Range={500,10000}, Increment=100,
+            CurrentValue=CONFIG.scanMaxCount, Flag="SM",
+            Callback=function(v) CONFIG.scanMaxCount = v end})
+        SettingsTab:CreateSlider({Name="Scan depth", Range={2,6}, Increment=1,
+            CurrentValue=CONFIG.nearbyDepth, Flag="SD",
+            Callback=function(v) CONFIG.nearbyDepth = v end})
+        SettingsTab:CreateSection("2D labels")
+        SettingsTab:CreateToggle({Name="Show distance labels", CurrentValue=true,
+            Flag="SDL", Callback=function(v) CONFIG.showDistanceLabels = v end})
+        SettingsTab:CreateSection("Outline")
+        SettingsTab:CreateColorPicker({Name="Outline color (enemy)",
+            Color=CONFIG.outlineColor, Flag="OC",
+            Callback=function(c)
+                CONFIG.outlineColor = c
+                for _, d in pairs(tracked) do
+                    if d.isActive and d.highlight then d.highlight.OutlineColor = c end
+                end
+            end})
+        SettingsTab:CreateColorPicker({Name="Own drone color",
+            Color=CONFIG.ownOutlineColor, Flag="OOC",
+            Callback=function(c) CONFIG.ownOutlineColor = c end})
+    end)
+    if not ok then
+        warn("[OT][5] Rayfield UI error: "..tostring(err))
+        UI_MODE = "fallback"
+        Rayfield = nil
+    end
+end
 
-local ListParagraph = MainTab:CreateParagraph({
-    Title = "Tracked (0)", Content = "Nothing yet.",
-})
+-- --------- FALLBACK UI (если Rayfield не поднялся) ------------
+if UI_MODE ~= "rayfield" then
+    UI_MODE = "fallback"
+    print("[OT][6] building fallback UI")
+    local pg = LocalPlayer:WaitForChild("PlayerGui", 10)
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "OT_Fallback"
+    sg.ResetOnSpawn = false
+    pcall(function() sg.Parent = CoreGui end)
+    if not sg.Parent then sg.Parent = pg end
 
--- ------------------------------------------------------------
--- SETTINGS
--- ------------------------------------------------------------
-local SettingsTab = Window:CreateTab("Settings", nil)
+    local win = Instance.new("Frame")
+    win.Size = UDim2.new(0, 280, 0, 420)
+    win.Position = UDim2.new(0, 20, 0, 80)
+    win.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+    win.BorderSizePixel = 0
+    win.Active = true
+    win.Draggable = true
+    win.Parent = sg
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0,8); corner.Parent = win
 
-SettingsTab:CreateSection("Auto height")
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 28)
+    title.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    title.BorderSizePixel = 0
+    title.Text = "Object Tracker v10 [fallback]"
+    title.TextColor3 = Color3.new(1,1,1)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 13
+    title.Parent = win
+    local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,8); tc.Parent = title
 
-SettingsTab:CreateToggle({
-    Name = "Auto height (recommended)",
-    CurrentValue = true,
-    Flag = "AutoHeight",
-    Callback = function(v) CONFIG.autoHeight = v end,
-})
+    local y = 34
+    local function mkBtn(text, cb)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -16, 0, 26)
+        b.Position = UDim2.new(0, 8, 0, y)
+        b.BackgroundColor3 = Color3.fromRGB(60, 60, 78)
+        b.BorderSizePixel = 0
+        b.TextColor3 = Color3.new(1,1,1)
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 13
+        b.Text = text
+        b.Parent = win
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,6); c.Parent = b
+        b.MouseButton1Click:Connect(cb)
+        y = y + 30
+        return b
+    end
+    local function mkToggle(text, def, cb)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -16, 0, 26)
+        b.Position = UDim2.new(0, 8, 0, y)
+        b.BackgroundColor3 = def and Color3.fromRGB(50,130,60) or Color3.fromRGB(60,60,78)
+        b.BorderSizePixel = 0
+        b.TextColor3 = Color3.new(1,1,1)
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 13
+        b.Text = text..(def and " [ON]" or " [OFF]")
+        b.Parent = win
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,6); c.Parent = b
+        local state = def
+        b.MouseButton1Click:Connect(function()
+            state = not state
+            b.Text = text..(state and " [ON]" or " [OFF]")
+            b.BackgroundColor3 = state and Color3.fromRGB(50,130,60) or Color3.fromRGB(60,60,78)
+            cb(state)
+        end)
+        y = y + 30
+        return b
+    end
 
-SettingsTab:CreateSlider({
-    Name = "Manual Min Y",
-    Range = {-500, 500}, Increment = 5, Suffix = " studs",
-    CurrentValue = CONFIG.flyMinY, Flag = "FlyMinY",
-    Callback = function(v)
-        CONFIG.flyMinY = v
-        CONFIG.autoHeight = false
-        for inst in pairs(tracked) do
-            local p = getPosSize(inst)
-            if p and p.Y < v then removeTracked(inst) end
-        end
-    end,
-})
+    mkBtn(">>> AUTO FIND <<<", doAutoFind)
+    mkBtn("Clear ALL", doClear)
+    mkBtn("List nearby (F)", doNearby)
+    mkToggle("Track ALL flying", false, doTrackAllToggle)
+    mkToggle("Show distance labels", true, function(v) CONFIG.showDistanceLabels = v end)
 
-SettingsTab:CreateSlider({
-    Name = "Manual Ground Y",
-    Range = {-500, 500}, Increment = 5, Suffix = " studs",
-    CurrentValue = CONFIG.groundY, Flag = "GroundY",
-    Callback = function(v)
-        CONFIG.groundY = v
-        CONFIG.autoHeight = false
-    end,
-})
+    -- distance +/- кнопки
+    local distRow = Instance.new("Frame")
+    distRow.Size = UDim2.new(1, -16, 0, 26)
+    distRow.Position = UDim2.new(0, 8, 0, y)
+    distRow.BackgroundTransparency = 1
+    distRow.Parent = win
+    y = y + 30
+    local dLabel = Instance.new("TextLabel")
+    dLabel.Size = UDim2.new(1, 0, 1, 0)
+    dLabel.BackgroundTransparency = 1
+    dLabel.TextColor3 = Color3.fromRGB(200,200,200)
+    dLabel.Font = Enum.Font.Code
+    dLabel.TextSize = 13
+    dLabel.Text = "Max dist: "..currentDistance.."m"
+    dLabel.Parent = distRow
+    local function mkSide(anchor)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, 30, 1, 0)
+        b.Position = anchor
+        b.BackgroundColor3 = Color3.fromRGB(60,60,78)
+        b.BorderSizePixel = 0
+        b.TextColor3 = Color3.new(1,1,1)
+        b.Text = anchor == 0 and "-" or "+"
+        b.Parent = distRow
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,6); c.Parent = b
+        return b
+    end
+    local minus = mkSide(UDim2.new(0,0,0,0))
+    local plus  = mkSide(UDim2.new(1,-30,0,0))
+    minus.MouseButton1Click:Connect(function()
+        currentDistance = math.max(100, currentDistance - 500)
+        dLabel.Text = "Max dist: "..currentDistance.."m"
+    end)
+    plus.MouseButton1Click:Connect(function()
+        currentDistance = math.min(10000, currentDistance + 500)
+        dLabel.Text = "Max dist: "..currentDistance.."m"
+    end)
 
-SettingsTab:CreateSection("Performance")
+    -- статус
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -16, 0, 100)
+    status.Position = UDim2.new(0, 8, 0, y)
+    status.BackgroundColor3 = Color3.fromRGB(15,15,20)
+    status.BorderSizePixel = 0
+    status.TextColor3 = Color3.fromRGB(220,220,220)
+    status.Font = Enum.Font.Code
+    status.TextSize = 12
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.TextYAlignment = Enum.TextYAlignment.Top
+    status.TextWrapped = true
+    status.Text = "Ready."
+    status.Parent = win
+    local sc = Instance.new("UICorner"); sc.CornerRadius = UDim.new(0,6); sc.Parent = status
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0,6); pad.PaddingTop = UDim.new(0,4); pad.Parent = status
+    y = y + 106
 
-SettingsTab:CreateSlider({
-    Name = "Update Hz",
-    Range = {2, 30}, Increment = 1, Suffix = " Hz",
-    CurrentValue = CONFIG.updateHz, Flag = "Hz",
-    Callback = function(v) CONFIG.updateHz = v end,
-})
+    local trackedL = Instance.new("TextLabel")
+    trackedL.Size = UDim2.new(1, -16, 1, -(y+8))
+    trackedL.Position = UDim2.new(0, 8, 0, y)
+    trackedL.BackgroundColor3 = Color3.fromRGB(15,15,20)
+    trackedL.BorderSizePixel = 0
+    trackedL.TextColor3 = Color3.fromRGB(220,220,220)
+    trackedL.Font = Enum.Font.Code
+    trackedL.TextSize = 12
+    trackedL.TextXAlignment = Enum.TextXAlignment.Left
+    trackedL.TextYAlignment = Enum.TextYAlignment.Top
+    trackedL.TextWrapped = true
+    trackedL.Text = "Tracked: 0"
+    trackedL.Parent = win
+    local tlc = Instance.new("UICorner"); tlc.CornerRadius = UDim.new(0,6); tlc.Parent = trackedL
+    local p2 = Instance.new("UIPadding"); p2.PaddingLeft = UDim.new(0,6); p2.PaddingTop = UDim.new(0,4); p2.Parent = trackedL
 
-SettingsTab:CreateSlider({
-    Name = "Max active highlights",
-    Range = {5, 30}, Increment = 1, Suffix = "",
-    CurrentValue = CONFIG.maxActiveHighlights, Flag = "MaxHL",
-    Callback = function(v) CONFIG.maxActiveHighlights = v end,
-})
+    StatusRef.set  = function(t, c) status.Text = t.."\n"..c end
+    TrackedRef.set = function(t, c) trackedL.Text = t.."\n"..c end
+end
 
-SettingsTab:CreateSlider({
-    Name = "Max tracked objects",
-    Range = {20, 200}, Increment = 10, Suffix = "",
-    CurrentValue = CONFIG.maxTracked, Flag = "MaxTracked",
-    Callback = function(v) CONFIG.maxTracked = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Scan max objects",
-    Range = {500, 10000}, Increment = 100, Suffix = "",
-    CurrentValue = CONFIG.scanMaxCount, Flag = "ScanMax",
-    Callback = function(v) CONFIG.scanMaxCount = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Scan depth",
-    Range = {2, 6}, Increment = 1, Suffix = "",
-    CurrentValue = CONFIG.nearbyDepth, Flag = "ScanDepth",
-    Callback = function(v) CONFIG.nearbyDepth = v end,
-})
-
-SettingsTab:CreateSection("Filters")
-
-SettingsTab:CreateSlider({
-    Name = "Min object size",
-    Range = {0, 50}, Increment = 0.5, Suffix = " studs",
-    CurrentValue = CONFIG.minSizeMagnitude, Flag = "MinSize",
-    Callback = function(v) CONFIG.minSizeMagnitude = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Max object size",
-    Range = {5, 200}, Increment = 1, Suffix = " studs",
-    CurrentValue = CONFIG.maxSizeMagnitude, Flag = "MaxSize",
-    Callback = function(v) CONFIG.maxSizeMagnitude = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "List nearby radius",
-    Range = {100, 3000}, Increment = 50, Suffix = "m",
-    CurrentValue = CONFIG.nearbyRadius, Flag = "NearbyRadius",
-    Callback = function(v) CONFIG.nearbyRadius = v end,
-})
-
-SettingsTab:CreateSection("2D labels")
-
-SettingsTab:CreateToggle({
-    Name = "Show distance labels",
-    CurrentValue = CONFIG.showDistanceLabels,
-    Flag = "ShowDistLabels",
-    Callback = function(v) CONFIG.showDistanceLabels = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Label text size",
-    Range = {10, 28}, Increment = 1, Suffix = "px",
-    CurrentValue = CONFIG.labelTextSize, Flag = "LabelSize",
-    Callback = function(v)
-        CONFIG.labelTextSize = v
-        for i = 1, #labelPool do
-            labelPool[i].TextSize = v
-        end
-    end,
-})
-
-SettingsTab:CreateSection("Outline")
-
-SettingsTab:CreateColorPicker({
-    Name = "Outline color (enemy)",
-    Color = CONFIG.outlineColor, Flag = "OutlineColor",
-    Callback = function(c)
-        CONFIG.outlineColor = c
-        for _, d in pairs(tracked) do
-            if d.isActive and d.highlight then d.highlight.OutlineColor = c end
-        end
-    end,
-})
-
-SettingsTab:CreateColorPicker({
-    Name = "Own drone color",
-    Color = CONFIG.ownOutlineColor, Flag = "OwnColor",
-    Callback = function(c)
-        CONFIG.ownOutlineColor = c
-        local veh = getOwnVehicle()
-        if veh then
-            local own = veh:FindFirstChild("OT_OwnHL")
-            if own then own.OutlineColor = c end
-        end
-    end,
-})
-
-print("[OT] stage 4: logic loops")
+print("[OT][7] UI mode = "..UI_MODE)
 
 -- ============================================================
 -- OWN HIGHLIGHT
@@ -943,12 +890,11 @@ local function updateOwnHighlight()
 end
 
 -- ============================================================
--- REFRESH HIGHLIGHTS
+-- REFRESH
 -- ============================================================
 local function refreshHighlights()
     local pp = getPlayerPos()
     if not pp then return end
-
     local list = {}
     for inst, data in pairs(tracked) do
         if not inst.Parent or not inst:IsDescendantOf(workspace) then
@@ -966,11 +912,9 @@ local function refreshHighlights()
         end
     end
     table.sort(list, function(a,b) return a.dist < b.dist end)
-
     local activeSet = {}
     local limit = math.min(#list, CONFIG.maxActiveHighlights)
     for i = 1, limit do activeSet[list[i].inst] = true end
-
     for inst, data in pairs(tracked) do
         if not inst.Parent or not inst:IsDescendantOf(workspace) then
             removeTracked(inst)
@@ -999,12 +943,9 @@ task.spawn(function()
     while true do
         task.wait(CONFIG.listUpdateEvery)
         updateOwnHighlight()
-
         local pp = getPlayerPos()
         if not pp then
-            pcall(function()
-                ListParagraph:Set({Title="Tracked (0)", Content="No position."})
-            end)
+            TrackedRef.set("Tracked (0)", "No position.")
         else
             local rows, count = {}, 0
             for inst, data in pairs(tracked) do
@@ -1020,32 +961,25 @@ task.spawn(function()
             end
             table.sort(rows, function(a,b) return a.dist < b.dist end)
             local lines = {}
-            local limit = math.min(#rows, 20)
-            for i = 1, limit do
+            local lim = math.min(#rows, 20)
+            for i = 1, lim do
                 local r = rows[i]
                 local mark = r.active and "[ON] " or "[  ] "
                 table.insert(lines, string.format("%s%s - %.0fm", mark, r.name, r.dist))
             end
-            if #rows > limit then
-                table.insert(lines, "... +"..(#rows-limit).." more")
-            end
+            if #rows > lim then table.insert(lines, "... +"..(#rows-lim).." more") end
             if #lines == 0 then lines = {"Nothing tracked."} end
             local mode = getOwnVehicle() and " [FPV]" or ""
-            pcall(function()
-                ListParagraph:Set({
-                    Title = "Tracked ("..count..")"..mode.." active<="..CONFIG.maxActiveHighlights,
-                    Content = table.concat(lines,"\n"),
-                })
-            end)
+            TrackedRef.set("Tracked ("..count..")"..mode.." active<="..CONFIG.maxActiveHighlights,
+                table.concat(lines,"\n"))
         end
     end
 end)
 
 -- ============================================================
--- DESCENDANT QUEUE
+-- QUEUE
 -- ============================================================
 local newObjectsQueue = {}
-
 workspace.DescendantAdded:Connect(function(obj)
     if obj:IsA("BasePart") or obj:IsA("Model") then
         if hasBlacklistedName(obj.Name) then return end
@@ -1057,9 +991,8 @@ task.spawn(function()
     while true do
         task.wait(CONFIG.descendantBatch)
         if #newObjectsQueue > 0 then
-            local queue = newObjectsQueue
-            newObjectsQueue = {}
-            for _, obj in ipairs(queue) do
+            local q = newObjectsQueue; newObjectsQueue = {}
+            for _, obj in ipairs(q) do
                 if obj.Parent and not tracked[obj] and isLikelyDrone(obj) then
                     if trackAllFlying then
                         addTracked(obj, obj.Name)
@@ -1082,14 +1015,13 @@ end)
 -- ============================================================
 local updateInterval = 1 / CONFIG.updateHz
 local accumulator = 0
-
 RunService.Heartbeat:Connect(function(dt)
     accumulator = accumulator + dt
     if accumulator < updateInterval then return end
     accumulator = 0
     updateInterval = 1 / CONFIG.updateHz
     local ok, err = pcall(refreshHighlights)
-    if not ok then warn("[OT] refresh error: "..tostring(err)) end
+    if not ok then warn("[OT] refresh: "..tostring(err)) end
 end)
 
 -- ============================================================
@@ -1111,25 +1043,23 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- AUTO HEIGHT LOOP
+-- AUTO HEIGHT
 -- ============================================================
 task.spawn(function()
     task.wait(1)
     while true do
-        if CONFIG.autoHeight then
-            pcall(updateAutoHeight)
-        end
+        if CONFIG.autoHeight then pcall(updateAutoHeight) end
         task.wait(CONFIG.heightUpdateEvery)
     end
 end)
 
 -- ============================================================
--- F KEYBIND
+-- F
 -- ============================================================
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
     if input.KeyCode ~= Enum.KeyCode.F then return end
-    doNearbyScan()
+    doNearby()
 end)
 
 -- ============================================================
@@ -1142,24 +1072,10 @@ end
 task.spawn(function()
     task.wait(2)
     pcall(updateAutoHeight)
-    pcall(function()
-        AutoInfo:Set({
-            Title = "Ready",
-            Content = string.format("Ground Y: %.0f\nFlyMin: %.0f\n\nPress AUTO FIND or F.",
-                CONFIG.groundY, CONFIG.flyMinY)
-        })
-    end)
+    StatusRef.set("Ready", string.format(
+        "Ground Y: %.0f\nFlyMin: %.0f\n\nPress AUTO FIND or F.\nUI: %s",
+        CONFIG.groundY, CONFIG.flyMinY, UI_MODE))
 end)
 
-task.spawn(function()
-    task.wait(1)
-    pcall(function()
-        Rayfield:Notify({
-            Title = "Object Tracker v9.1",
-            Content = "K - window | F - scan | AUTO FIND - start",
-            Duration = 5,
-        })
-    end)
-end)
-
-print("[ObjectTracker v9.1] ready")
+print("[OT][8] all hooks installed, UI="..UI_MODE)
+print("[ObjectTracker v10] ready")
