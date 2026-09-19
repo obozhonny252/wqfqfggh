@@ -1,5 +1,6 @@
 -- ============================================================
--- OBJECT TRACKER v3.4 - SKYFIRE edition
+-- OBJECT TRACKER v3.5 - SKYFIRE edition
+-- поддержка FPV режима + свой дрон + лимит подсветок
 -- ============================================================
 
 local Rayfield
@@ -57,7 +58,7 @@ local CONFIG = {
     outlineTransparency = 0,
     fillTransparency    = 1,
 
-    ownOutlineColor = Color3.fromRGB(80, 255, 120),
+    ownOutlineColor     = Color3.fromRGB(80, 255, 120),
     ownFillTransparency = 0.6,
 
     groundY  = 5,
@@ -72,9 +73,10 @@ local scanRunning     = false
 local trackAllFlying  = false
 
 -- ============================================================
--- HELPERS (нужны раньше UI)
+-- HELPERS
 -- ============================================================
 local function getPosSize(obj)
+    if not obj or not obj.Parent then return nil end
     if obj:IsA("BasePart") then
         return obj.Position, obj.Size.Magnitude
     elseif obj:IsA("Model") then
@@ -82,9 +84,11 @@ local function getPosSize(obj)
             local c, s = obj:GetBoundingBox(); return c, s
         end)
         if ok and cf and sz then return cf.Position, sz.Magnitude end
-        return obj:GetPivot().Position, 5
+        local ok2, pivot = pcall(function() return obj:GetPivot() end)
+        if ok2 and pivot then return pivot.Position, 5 end
+        return nil
     end
-    return nil, 0
+    return nil
 end
 
 local function hasBlacklistedName(name)
@@ -103,7 +107,7 @@ local function isLikelyDrone(obj)
     if not classAllowed(obj) then return false end
     if hasBlacklistedName(obj.Name) then return false end
     local pos, size = getPosSize(obj)
-    if not pos then return false end
+    if not pos or not size then return false end
     if size < CONFIG.minSizeMagnitude then return false end
     if size > CONFIG.maxSizeMagnitude then return false end
     if pos.Y < CONFIG.flyMinY then return false end
@@ -121,31 +125,83 @@ local function nameMatchesPattern(name, p)
 end
 
 -- ============================================================
+-- ОПРЕДЕЛЕНИЕ СВОЕГО ТРАНСПОРТА И ПОЗИЦИИ ИГРОКА
+-- ============================================================
+-- 1) Humanoid.SeatPart (машины, обычные сиденья)
+-- 2) Camera.CameraSubject — если камера смотрит на BasePart вне персонажа,
+--    значит мы в FPV-режиме (или в кокпите). Тогда "мы" = этот объект.
+local function getOwnVehicle()
+    local char = LocalPlayer.Character
+
+    -- 1) сиденье
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.SeatPart then
+            local parent = hum.SeatPart.Parent
+            if parent and parent ~= char and parent ~= workspace then
+                return parent
+            end
+            return hum.SeatPart
+        end
+    end
+
+    -- 2) камера смотрит на что-то вне персонажа
+    local cam = workspace.CurrentCamera
+    if cam then
+        local subj = cam.CameraSubject
+        if subj and subj:IsA("BasePart") then
+            local insideChar = char and subj:IsDescendantOf(char)
+            if not insideChar then
+                -- если у BasePart есть родитель-модель вне workspace — берём её
+                local par = subj.Parent
+                if par and par ~= workspace and not par:IsA("Player") then
+                    return par
+                end
+                return subj
+            end
+        end
+    end
+    return nil
+end
+
+-- Позиция "игрока" — откуда считать дистанции.
+-- Если на дроне — от дрона. Если пешком — от персонажа. Иначе — от камеры.
+local function getPlayerPos()
+    local veh = getOwnVehicle()
+    if veh then
+        local pos = getPosSize(veh)
+        if pos then return pos end
+    end
+    local char = LocalPlayer.Character
+    if char then
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then return root.Position end
+    end
+    local cam = workspace.CurrentCamera
+    if cam then return cam.CFrame.Position end
+    return nil
+end
+
+-- ============================================================
 -- IS DESTROYED
 -- ============================================================
 local function isDestroyed(obj)
-    -- 1) родителя нет
     if not obj.Parent or not obj:IsDescendantOf(workspace) then return true end
 
-    -- 2) упал на землю
     local pos = getPosSize(obj)
     if pos and pos.Y < CONFIG.groundY then return true end
 
     if obj:IsA("Model") then
-        -- 3) Humanoid мёртв
         local hum = obj:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health <= 0 then return true end
 
-        -- 4) атрибуты
         local ok, v = pcall(function() return obj:GetAttribute("Destroyed") end)
         if ok and v == true then return true end
         local ok2, v2 = pcall(function() return obj:GetAttribute("dead") end)
         if ok2 and v2 == true then return true end
 
-        -- 5) теги
         if obj:HasTag("Destroyed") or obj:HasTag("Dead") then return true end
 
-        -- 6) все BasePart внутри Unanchored=false и внизу? — тоже мёртв
         local primary = obj.PrimaryPart
         if primary and primary.AssemblyLinearVelocity.Magnitude < 0.5
            and primary.Position.Y < CONFIG.groundY + 3 then
@@ -158,18 +214,20 @@ end
 -- ============================================================
 -- HIGHLIGHT
 -- ============================================================
-local function createHighlightFor(inst, isOwn)
-    -- удаляем старый если есть
-    local old = inst:FindFirstChild("OT_HL")
-    if old then old:Destroy() end
-    local oldOwn = inst:FindFirstChild("OT_OwnHL")
-    if oldOwn then oldOwn:Destroy() end
+local function removeHighlightFrom(inst)
+    if not inst then return end
+    local hl = inst:FindFirstChild("OT_HL")
+    if hl then hl:Destroy() end
+    local own = inst:FindFirstChild("OT_OwnHL")
+    if own then own:Destroy() end
+end
 
+local function createHighlightFor(inst, isOwn)
+    removeHighlightFrom(inst)
     local hl = Instance.new("Highlight")
     hl.Adornee = inst
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     hl.Parent = inst
-
     if isOwn then
         hl.Name = "OT_OwnHL"
         hl.FillTransparency = CONFIG.ownFillTransparency
@@ -182,13 +240,6 @@ local function createHighlightFor(inst, isOwn)
         hl.OutlineTransparency = CONFIG.outlineTransparency
     end
     return hl
-end
-
-local function removeHighlightFrom(inst)
-    local hl = inst:FindFirstChild("OT_HL")
-    if hl then hl:Destroy() end
-    local own = inst:FindFirstChild("OT_OwnHL")
-    if own then own:Destroy() end
 end
 
 local function addTracked(inst, name)
@@ -212,7 +263,7 @@ local function removeTracked(inst)
 end
 
 -- ============================================================
--- RAYFIELD WINDOW
+-- RAYFIELD UI
 -- ============================================================
 local Window = Rayfield:CreateWindow({
     Name = "Object Tracker",
@@ -222,9 +273,6 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false,
 })
 
--- ------------------------------------------------------------
--- MAIN
--- ------------------------------------------------------------
 local MainTab = Window:CreateTab("Main", nil)
 
 MainTab:CreateSection("Distance")
@@ -349,18 +397,16 @@ local NearbyParagraph = MainTab:CreateParagraph({
 MainTab:CreateButton({
     Name = "List nearby objects (200m)",
     Callback = function()
-        local char = LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if not root then
-            NearbyParagraph:Set({Title="Nearby", Content="No character."})
+        local pp = getPlayerPos()
+        if not pp then
+            NearbyParagraph:Set({Title="Nearby", Content="No position."})
             return
         end
-        local pp = root.Position
         local rows = {}
         for _, obj in ipairs(workspace:GetDescendants()) do
             if obj:IsA("BasePart") or obj:IsA("Model") then
                 local pos, size = getPosSize(obj)
-                if pos then
+                if pos and size then
                     local dist = (pos - pp).Magnitude
                     if dist <= 200 and size <= 100 then
                         table.insert(rows, {
@@ -388,9 +434,7 @@ MainTab:CreateButton({
 MainTab:CreateButton({
     Name = "Clear ALL tracked + patterns",
     Callback = function()
-        for inst in pairs(tracked) do
-            removeHighlightFrom(inst)
-        end
+        for inst in pairs(tracked) do removeHighlightFrom(inst) end
         tracked = {}
         patterns = {}
         ScanStatus:Set({Title="Scan", Content="Cleared."})
@@ -403,9 +447,9 @@ local ListParagraph = MainTab:CreateParagraph({
     Title = "Tracked (0)", Content = "Nothing yet.",
 })
 
--- ------------------------------------------------------------
+-- ============================================================
 -- SETTINGS
--- ------------------------------------------------------------
+-- ============================================================
 local SettingsTab = Window:CreateTab("Settings", nil)
 
 SettingsTab:CreateSection("Outline")
@@ -416,10 +460,8 @@ SettingsTab:CreateColorPicker({
     Flag = "OutlineColor",
     Callback = function(c)
         CONFIG.outlineColor = c
-        for inst, d in pairs(tracked) do
-            if d.isActive and d.highlight then
-                d.highlight.OutlineColor = c
-            end
+        for _, d in pairs(tracked) do
+            if d.isActive and d.highlight then d.highlight.OutlineColor = c end
         end
     end,
 })
@@ -430,16 +472,9 @@ SettingsTab:CreateColorPicker({
     Flag = "OwnColor",
     Callback = function(c)
         CONFIG.ownOutlineColor = c
-        local char = LocalPlayer.Character
-        if char then
-            local own = char:FindFirstChild("OT_OwnHL")
-            if not own then
-                -- может быть на сиденье
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.SeatPart and hum.SeatPart.Parent then
-                    own = hum.SeatPart.Parent:FindFirstChild("OT_OwnHL")
-                end
-            end
+        local veh = getOwnVehicle()
+        if veh then
+            local own = veh:FindFirstChild("OT_OwnHL")
             if own then own.OutlineColor = c end
         end
     end,
@@ -453,9 +488,7 @@ SettingsTab:CreateSlider({
     Callback = function(v)
         CONFIG.outlineTransparency = v
         for _, d in pairs(tracked) do
-            if d.isActive and d.highlight then
-                d.highlight.OutlineTransparency = v
-            end
+            if d.isActive and d.highlight then d.highlight.OutlineTransparency = v end
         end
     end,
 })
@@ -503,45 +536,34 @@ SettingsTab:CreateSlider({
 })
 
 -- ============================================================
--- СВОЙ ДРОН
+-- СВОЙ ТРАНСПОРТ / ДРОН
 -- ============================================================
 local ownHighlighted = nil
-
-local function getOwnVehicle()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if hum and hum.SeatPart then
-        return hum.SeatPart.Parent or hum.SeatPart
-    end
-    return nil
-end
 
 local function updateOwnHighlight()
     local target = getOwnVehicle()
     if not target then
-        -- убираем подсветку с прежней цели
         if ownHighlighted then
             removeHighlightFrom(ownHighlighted)
             ownHighlighted = nil
         end
         return
     end
-    if ownHighlighted ~= target then
-        if ownHighlighted then removeHighlightFrom(ownHighlighted) end
+    if ownHighlighted ~= target or not target:FindFirstChild("OT_OwnHL") then
+        if ownHighlighted and ownHighlighted ~= target then
+            removeHighlightFrom(ownHighlighted)
+        end
         ownHighlighted = target
         createHighlightFor(target, true)
     end
 end
 
 -- ============================================================
--- REFRESH HIGHLIGHTS (топ-N ближайших)
+-- REFRESH HIGHLIGHTS
 -- ============================================================
 local function refreshHighlights()
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local pp = root.Position
+    local pp = getPlayerPos()
+    if not pp then return end
 
     local list = {}
     for inst, data in pairs(tracked) do
@@ -563,7 +585,6 @@ local function refreshHighlights()
         activeSet[list[i].inst] = true
     end
 
-    -- удаляем мёртвых/далёких
     for inst, data in pairs(tracked) do
         if not inst.Parent or not inst:IsDescendantOf(workspace) then
             removeTracked(inst)
@@ -587,19 +608,17 @@ local function refreshHighlights()
 end
 
 -- ============================================================
--- LIST + OWN HIGHLIGHT
+-- СПИСОК + CLEANUP
 -- ============================================================
 task.spawn(function()
     while true do
         task.wait(0.4)
         updateOwnHighlight()
 
-        local char = LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if not root then
-            ListParagraph:Set({Title="Tracked (0)", Content="No character."})
+        local pp = getPlayerPos()
+        if not pp then
+            ListParagraph:Set({Title="Tracked (0)", Content="No position."})
         else
-            local pp = root.Position
             local rows, count = {}, 0
             for inst, data in pairs(tracked) do
                 count = count + 1
@@ -624,8 +643,10 @@ task.spawn(function()
                 table.insert(lines, "... +"..(#rows-limit).." more")
             end
             if #lines == 0 then lines = {"Nothing tracked."} end
+
+            local mode = getOwnVehicle() and " (FPV/vehicle)" or ""
             ListParagraph:Set({
-                Title = "Tracked ("..count..")  active: <= "..CONFIG.maxActiveHighlights,
+                Title = "Tracked ("..count..")"..mode.."  active: <= "..CONFIG.maxActiveHighlights,
                 Content = table.concat(lines,"\n"),
             })
         end
@@ -639,7 +660,6 @@ local function checkAndAdd(obj)
     if not (obj:IsA("BasePart") or obj:IsA("Model")) then return end
     if tracked[obj] then return end
     if not isLikelyDrone(obj) then return end
-
     if trackAllFlying then
         addTracked(obj, obj.Name)
         return
@@ -665,7 +685,6 @@ RunService.Heartbeat:Connect(function(dt)
     if accumulator < updateInterval then return end
     accumulator = 0
 
-    -- 1) чистим мёртвых
     for inst in pairs(tracked) do
         if not inst.Parent or not inst:IsDescendantOf(workspace) then
             removeTracked(inst)
@@ -674,10 +693,8 @@ RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- 2) обновляем активные подсветки
     refreshHighlights()
 
-    -- 3) если "всё что летит" — подхватываем новые
     if trackAllFlying then
         for _, obj in ipairs(workspace:GetDescendants()) do
             if not tracked[obj] and isLikelyDrone(obj) then
@@ -710,10 +727,8 @@ task.spawn(function()
     end
     local c = 0
     for _ in pairs(found) do c = c + 1 end
-    ScanStatus:Set({
-        Title = "Auto-scan on start",
-        Content = "Found "..c.." groups.",
-    })
+    ScanStatus:Set({Title="Auto-scan on start",
+        Content="Found "..c.." groups."})
 end)
 
 Rayfield:Notify({
@@ -722,4 +737,4 @@ Rayfield:Notify({
     Duration = 4,
 })
 
-print("[ObjectTracker v3.4] ready")
+print("[ObjectTracker v3.5] ready")
