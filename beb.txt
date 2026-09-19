@@ -1,5 +1,5 @@
 -- ============================================================
--- OBJECT TRACKER v4.1 - SKYFIRE edition (optimized)
+-- OBJECT TRACKER v5 - SKYFIRE edition (final)
 -- ============================================================
 
 local Rayfield
@@ -32,19 +32,19 @@ if not LocalPlayer then return end
 local CONFIG = {
     minDistance   = 100,
     maxDistance   = 10000,
-    startDistance = 1500,
+    startDistance = 3000,
 
     nearbyRadius = 800,
 
     flyMinY = -100,
-    groundY = -100,
+    groundY = -150,
 
-    minSizeMagnitude = 3,
-    maxSizeMagnitude = 30,
+    minSizeMagnitude = 2,
+    maxSizeMagnitude = 40,
 
     droneKeywords = {
         "vespa", "vector", "varan", "fpv", "kp-1", "kp1", "predator",
-        "drone", "uav", "bpla", "recon", "cube",
+        "drone", "uav", "bpla", "recon",
         "shahed", "shahid", "geran", "lancet", "orlan",
         "kamikaze", "missile", "rocket",
     },
@@ -65,12 +65,15 @@ local CONFIG = {
     fillTransparency    = 1,
 
     ownOutlineColor     = Color3.fromRGB(80, 255, 120),
-    ownFillTransparency = 0.6,
+    ownFillTransparency = 0.4,
 
     maxActiveHighlights = 25,
-    updateHz = 8,       -- меньше = меньше лагов
-    posCacheTTL = 0.35, -- кэш позиции объекта (секунды)
-    rescanAllEvery = 2, -- пересборка "все летающие" раз в N сек
+    maxTracked          = 120,
+    maxTrackedDistance  = 3000,
+
+    updateHz = 10,
+    posCacheTTL = 0.35,
+    rescanAllEvery = 2,
 }
 
 local currentDistance = CONFIG.startDistance
@@ -80,7 +83,7 @@ local scanRunning     = false
 local trackAllFlying  = false
 
 -- ============================================================
--- ПОЗИЦИИ + КЭШ
+-- КЭШ ПОЗИЦИЙ
 -- ============================================================
 local posCache = {}
 
@@ -90,13 +93,9 @@ local function getPosSizeRaw(obj)
         return obj.Position, obj.Size.Magnitude
     elseif obj:IsA("Model") then
         local prim = obj.PrimaryPart
-        if prim then
-            return prim.Position, prim.Size.Magnitude
-        end
+        if prim then return prim.Position, prim.Size.Magnitude end
         local ok, pivot = pcall(function() return obj:GetPivot() end)
-        if ok and pivot then
-            return pivot.Position, 10
-        end
+        if ok and pivot then return pivot.Position, 10 end
         return nil
     end
     return nil
@@ -117,7 +116,6 @@ local function getPosSize(obj)
     return pos, size
 end
 
--- чистим кэш от мёртвых раз в 5 сек
 task.spawn(function()
     while true do
         task.wait(5)
@@ -164,15 +162,18 @@ local function nameMatchesPattern(name, p)
 end
 
 -- ============================================================
--- СВОЙ ТРАНСПОРТ / FPV
+-- СВОЙ ТРАНСПОРТ / FPV (расширенное определение)
 -- ============================================================
 local ownVehicleCache = {t = 0, val = nil}
+
 local function getOwnVehicle()
     local now = os.clock()
-    if now - ownVehicleCache.t < 0.5 then return ownVehicleCache.val end
+    if now - ownVehicleCache.t < 0.3 then return ownVehicleCache.val end
     ownVehicleCache.t = now
 
     local char = LocalPlayer.Character
+
+    -- 1) SeatPart
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum and hum.SeatPart then
@@ -181,21 +182,76 @@ local function getOwnVehicle()
             ownVehicleCache.val = v
             return v
         end
+
+        -- 2) Weld/WeldConstraint к внешнему объекту
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+                local p0, p1 = d.Part0, d.Part1
+                local other = nil
+                if p1 and not p1:IsDescendantOf(char) then other = p1 end
+                if not other and p0 and not p0:IsDescendantOf(char) then other = p0 end
+                if other then
+                    local par = other.Parent
+                    local v = (par and par:IsA("Model")) and par or other
+                    ownVehicleCache.val = v
+                    return v
+                end
+            end
+        end
     end
 
     local cam = workspace.CurrentCamera
     if cam then
         local subj = cam.CameraSubject
+
+        -- 3) CameraSubject = BasePart вне персонажа
         if subj and subj:IsA("BasePart") then
             local insideChar = char and subj:IsDescendantOf(char)
             if not insideChar then
                 local par = subj.Parent
-                local v = (par and par ~= workspace and not par:IsA("Player")) and par or subj
+                local v = (par and par:IsA("Model")) and par or subj
                 ownVehicleCache.val = v
                 return v
             end
         end
+
+        -- 4) CameraSubject = Attachment (FPV)
+        if subj and subj:IsA("Attachment") then
+            local p = subj.Parent
+            while p and p ~= workspace do
+                if p:IsA("Model") then
+                    ownVehicleCache.val = p
+                    return p
+                end
+                p = p.Parent
+            end
+            ownVehicleCache.val = subj.Parent
+            return subj.Parent
+        end
+
+        -- 5) Fallback: камера далеко от персонажа — ищем Model рядом с камерой
+        if char then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local dist = root and (cam.CFrame.Position - root.Position).Magnitude or 0
+            if dist > 25 then
+                local best, bestDist = nil, 60
+                for _, obj in ipairs(workspace:GetDescendants()) do
+                    if obj:IsA("Model") and not obj:IsDescendantOf(char) then
+                        local ok, pivot = pcall(function() return obj:GetPivot() end)
+                        if ok and pivot then
+                            local d = (pivot.Position - cam.CFrame.Position).Magnitude
+                            if d < bestDist then best, bestDist = obj, d end
+                        end
+                    end
+                end
+                if best then
+                    ownVehicleCache.val = best
+                    return best
+                end
+            end
+        end
     end
+
     ownVehicleCache.val = nil
     return nil
 end
@@ -257,21 +313,20 @@ local function removeHighlightFrom(inst)
 end
 
 local function createHighlightFor(inst, isOwn)
-    local existing = inst:FindFirstChild(isOwn and "OT_OwnHL" or "OT_HL")
-    local hl = existing
+    local name = isOwn and "OT_OwnHL" or "OT_HL"
+    local hl = inst:FindFirstChild(name)
     if not hl then
         hl = Instance.new("Highlight")
         hl.Adornee = inst
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Name = name
         hl.Parent = inst
     end
     if isOwn then
-        hl.Name = "OT_OwnHL"
         hl.FillTransparency = CONFIG.ownFillTransparency
         hl.OutlineColor = CONFIG.ownOutlineColor
         hl.OutlineTransparency = 0
     else
-        hl.Name = "OT_HL"
         hl.FillTransparency = CONFIG.fillTransparency
         hl.OutlineColor = CONFIG.outlineColor
         hl.OutlineTransparency = CONFIG.outlineTransparency
@@ -284,7 +339,7 @@ local function addTracked(inst, name)
     if tracked[inst] then return false end
     local count = 0
     for _ in pairs(tracked) do count = count + 1 end
-    if count >= 400 then return false end
+    if count >= CONFIG.maxTracked then return false end
     tracked[inst] = {
         displayName = name or inst.Name,
         isActive    = false,
@@ -302,7 +357,7 @@ local function removeTracked(inst)
 end
 
 -- ============================================================
--- RAYFIELD UI
+-- RAYFIELD
 -- ============================================================
 local Window = Rayfield:CreateWindow({
     Name = "Object Tracker",
@@ -349,7 +404,7 @@ local ScanStatus = MainTab:CreateParagraph({
 
 local ExtraKeywords = MainTab:CreateInput({
     Name = "Extra keywords (comma separated)",
-    PlaceholderText = "e.g. cube, krot",
+    PlaceholderText = "e.g. krot, ugv",
     RemoveTextAfterFocusLost = false,
     Flag = "ExtraKeywords",
     Callback = function() end,
@@ -546,7 +601,7 @@ SettingsTab:CreateSlider({
 SettingsTab:CreateSection("Performance")
 
 SettingsTab:CreateSlider({
-    Name = "Update Hz (меньше = легче)",
+    Name = "Update Hz",
     Range = {3, 30},
     Increment = 1, Suffix = " Hz",
     CurrentValue = CONFIG.updateHz,
@@ -561,6 +616,24 @@ SettingsTab:CreateSlider({
     CurrentValue = CONFIG.maxActiveHighlights,
     Flag = "MaxHL",
     Callback = function(v) CONFIG.maxActiveHighlights = v end,
+})
+
+SettingsTab:CreateSlider({
+    Name = "Max tracked objects",
+    Range = {30, 300},
+    Increment = 10, Suffix = "",
+    CurrentValue = CONFIG.maxTracked,
+    Flag = "MaxTracked",
+    Callback = function(v) CONFIG.maxTracked = v end,
+})
+
+SettingsTab:CreateSlider({
+    Name = "Remove beyond distance",
+    Range = {500, 10000},
+    Increment = 100, Suffix = "m",
+    CurrentValue = CONFIG.maxTrackedDistance,
+    Flag = "MaxTrackedDist",
+    Callback = function(v) CONFIG.maxTrackedDistance = v end,
 })
 
 SettingsTab:CreateSlider({
@@ -638,13 +711,21 @@ local function updateOwnHighlight()
 end
 
 -- ============================================================
--- REFRESH HIGHLIGHTS (топ-N ближайших)
+-- REFRESH HIGHLIGHTS
 -- ============================================================
 local ownCharName = ""
 
 local function refreshHighlights()
     local pp = getPlayerPos()
     if not pp then return end
+
+    -- чистка далёких
+    for inst in pairs(tracked) do
+        local pos = getPosSize(inst)
+        if pos and (pos - pp).Magnitude > CONFIG.maxTrackedDistance then
+            removeTracked(inst)
+        end
+    end
 
     local list = {}
     for inst, data in pairs(tracked) do
@@ -690,7 +771,7 @@ local function refreshHighlights()
 end
 
 -- ============================================================
--- СПИСОК (обновление раз в 0.7 сек)
+-- LIST (обновление раз в 0.7 сек)
 -- ============================================================
 task.spawn(function()
     while true do
@@ -758,7 +839,7 @@ end
 workspace.DescendantAdded:Connect(checkAndAdd)
 
 -- ============================================================
--- HEARTBEAT (только чистка + refresh)
+-- HEARTBEAT
 -- ============================================================
 local updateInterval = 1 / CONFIG.updateHz
 local accumulator = 0
@@ -781,7 +862,7 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 -- ============================================================
--- ФОНОВЫЙ СКАН "всё летающие" (раз в N секунд, не в Heartbeat)
+-- ФОНОВЫЙ СКАН (раз в 2 сек)
 -- ============================================================
 task.spawn(function()
     while true do
@@ -854,4 +935,4 @@ Rayfield:Notify({
     Duration = 4,
 })
 
-print("[ObjectTracker v4.1] ready")
+print("[ObjectTracker v5] ready")
