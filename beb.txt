@@ -1,5 +1,5 @@
 -- ============================================================
--- OBJECT TRACKER v5 - SKYFIRE edition (final)
+-- OBJECT TRACKER v6.2 - SKYFIRE edition
 -- ============================================================
 
 local Rayfield
@@ -162,7 +162,7 @@ local function nameMatchesPattern(name, p)
 end
 
 -- ============================================================
--- СВОЙ ТРАНСПОРТ / FPV (расширенное определение)
+-- СВОЙ ТРАНСПОРТ / FPV
 -- ============================================================
 local ownVehicleCache = {t = 0, val = nil}
 
@@ -173,7 +173,6 @@ local function getOwnVehicle()
 
     local char = LocalPlayer.Character
 
-    -- 1) SeatPart
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum and hum.SeatPart then
@@ -183,7 +182,6 @@ local function getOwnVehicle()
             return v
         end
 
-        -- 2) Weld/WeldConstraint к внешнему объекту
         for _, d in ipairs(char:GetDescendants()) do
             if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
                 local p0, p1 = d.Part0, d.Part1
@@ -204,7 +202,6 @@ local function getOwnVehicle()
     if cam then
         local subj = cam.CameraSubject
 
-        -- 3) CameraSubject = BasePart вне персонажа
         if subj and subj:IsA("BasePart") then
             local insideChar = char and subj:IsDescendantOf(char)
             if not insideChar then
@@ -215,7 +212,6 @@ local function getOwnVehicle()
             end
         end
 
-        -- 4) CameraSubject = Attachment (FPV)
         if subj and subj:IsA("Attachment") then
             local p = subj.Parent
             while p and p ~= workspace do
@@ -229,7 +225,6 @@ local function getOwnVehicle()
             return subj.Parent
         end
 
-        -- 5) Fallback: камера далеко от персонажа — ищем Model рядом с камерой
         if char then
             local root = char:FindFirstChild("HumanoidRootPart")
             local dist = root and (cam.CFrame.Position - root.Position).Magnitude or 0
@@ -485,11 +480,11 @@ MainTab:CreateButton({
 MainTab:CreateSection("Debug")
 
 local NearbyParagraph = MainTab:CreateParagraph({
-    Title = "Nearby (0)", Content = "Нажми когда рядом дрон.",
+    Title = "Nearby (0)", Content = "Нажми кнопку или F, когда рядом дрон.",
 })
 
 MainTab:CreateButton({
-    Name = "List nearby objects",
+    Name = "List nearby objects (F)",
     Callback = function()
         local pp = getPlayerPos()
         if not pp then
@@ -719,7 +714,6 @@ local function refreshHighlights()
     local pp = getPlayerPos()
     if not pp then return end
 
-    -- чистка далёких
     for inst in pairs(tracked) do
         local pos = getPosSize(inst)
         if pos and (pos - pp).Magnitude > CONFIG.maxTrackedDistance then
@@ -771,7 +765,7 @@ local function refreshHighlights()
 end
 
 -- ============================================================
--- LIST (обновление раз в 0.7 сек)
+-- LIST
 -- ============================================================
 task.spawn(function()
     while true do
@@ -862,7 +856,7 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 -- ============================================================
--- ФОНОВЫЙ СКАН (раз в 2 сек)
+-- ФОНОВЫЙ СКАН
 -- ============================================================
 task.spawn(function()
     while true do
@@ -878,28 +872,47 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- РАЗБЛОКИРОВКА МЫШИ
+-- F - СКАН БЛИЖНИХ ОБЪЕКТОВ
 -- ============================================================
-local uiUnlocked = false
-
-RunService.RenderStepped:Connect(function()
-    if uiUnlocked then
-        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
-    end
-end)
-
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
-        uiUnlocked = not uiUnlocked
-        if Rayfield and Rayfield.ToggleUI then
-            pcall(function() Rayfield:ToggleUI() end)
-        end
-        if not uiUnlocked then
-            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+    if input.KeyCode ~= Enum.KeyCode.F then return end
+
+    local pp = getPlayerPos()
+    if not pp then return end
+
+    local radius = CONFIG.nearbyRadius
+    local rows = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local pos, size = getPosSize(obj)
+            if pos and size then
+                local dist = (pos - pp).Magnitude
+                if dist <= radius then
+                    table.insert(rows, {
+                        name=obj.Name, class=obj.ClassName,
+                        dist=dist, y=pos.Y, size=size,
+                    })
+                end
+            end
         end
     end
+    table.sort(rows, function(a,b) return a.dist < b.dist end)
+    local lines = {}
+    local limit = math.min(#rows, 40)
+    for i = 1, limit do
+        local r = rows[i]
+        table.insert(lines, string.format("%s|%s|%.0fm|Y=%.0f|S=%.1f",
+            r.class, r.name, r.dist, r.y, r.size))
+    end
+    if #rows == 0 then lines = {"Nothing."} end
+
+    pcall(function()
+        NearbyParagraph:Set({
+            Title = "Nearby ("..#rows..") r="..radius,
+            Content = table.concat(lines,"\n"),
+        })
+    end)
 end)
 
 -- ============================================================
@@ -931,8 +944,8 @@ end)
 
 Rayfield:Notify({
     Title = "Object Tracker",
-    Content = "Loaded. RightShift - toggle window.",
+    Content = "K - toggle UI | F - scan nearby",
     Duration = 4,
 })
 
-print("[ObjectTracker v5] ready")
+print("[ObjectTracker v6.2] ready")
