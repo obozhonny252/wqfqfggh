@@ -1,6 +1,6 @@
 -- ============================================================
--- OBJECT TRACKER v3.5 - SKYFIRE edition
--- поддержка FPV режима + свой дрон + лимит подсветок
+-- OBJECT TRACKER v4 - SKYFIRE edition
+-- все параметры настраиваются в UI
 -- ============================================================
 
 local Rayfield
@@ -21,22 +21,36 @@ do
 end
 if not Rayfield then warn("[OT] Rayfield не загрузился"); return end
 
-local Players     = game:GetService("Players")
-local RunService  = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer      = Players.LocalPlayer
 if not LocalPlayer then return end
 
 -- ============================================================
--- CONFIG
+-- CONFIG (стартовые значения, всё меняется в UI)
 -- ============================================================
 local CONFIG = {
+    -- дистанция отрисовки
     minDistance   = 100,
     maxDistance   = 5000,
-    startDistance = 1000,
+    startDistance = 1500,
 
+    -- радиус "List nearby"
+    nearbyRadius = 800,
+
+    -- фильтры высоты (для SKYFIRE отрицательные)
+    flyMinY = -100,   -- ниже этого = не считаем летающим
+    groundY = -100,   -- ниже этого = считаем упавшим
+
+    -- фильтры размера
+    minSizeMagnitude = 3,
+    maxSizeMagnitude = 30,
+
+    -- ключевые слова (по подстроке, регистр не важен)
     droneKeywords = {
         "vespa", "vector", "varan", "fpv", "kp-1", "kp1", "predator",
-        "drone", "uav", "bpla", "recon",
+        "drone", "uav", "bpla", "recon", "cube",
         "shahed", "shahid", "geran", "lancet", "orlan",
         "kamikaze", "missile", "rocket",
     },
@@ -46,13 +60,11 @@ local CONFIG = {
         "leaf", "leaves", "trunk", "branch", "stone", "hill",
         "mountain", "cloud", "sky", "fence", "wall", "road",
         "terrain", "decal", "shrub", "flower", "root",
+        "humanoid", "torso", "head", "arm", "leg", "handle",
+        "suspension", "axle", "spring",
     },
 
     allowedClasses = { MeshPart = true, Model = true },
-
-    flyMinY          = 15,
-    minSizeMagnitude = 1.5,
-    maxSizeMagnitude = 25,
 
     outlineColor        = Color3.fromRGB(255, 80, 80),
     outlineTransparency = 0,
@@ -61,9 +73,8 @@ local CONFIG = {
     ownOutlineColor     = Color3.fromRGB(80, 255, 120),
     ownFillTransparency = 0.6,
 
-    groundY  = 5,
-    updateHz = 20,
     maxActiveHighlights = 25,
+    updateHz = 20,
 }
 
 local currentDistance = CONFIG.startDistance
@@ -125,15 +136,10 @@ local function nameMatchesPattern(name, p)
 end
 
 -- ============================================================
--- ОПРЕДЕЛЕНИЕ СВОЕГО ТРАНСПОРТА И ПОЗИЦИИ ИГРОКА
+-- СВОЙ ТРАНСПОРТ / FPV
 -- ============================================================
--- 1) Humanoid.SeatPart (машины, обычные сиденья)
--- 2) Camera.CameraSubject — если камера смотрит на BasePart вне персонажа,
---    значит мы в FPV-режиме (или в кокпите). Тогда "мы" = этот объект.
 local function getOwnVehicle()
     local char = LocalPlayer.Character
-
-    -- 1) сиденье
     if char then
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum and hum.SeatPart then
@@ -145,14 +151,12 @@ local function getOwnVehicle()
         end
     end
 
-    -- 2) камера смотрит на что-то вне персонажа
     local cam = workspace.CurrentCamera
     if cam then
         local subj = cam.CameraSubject
         if subj and subj:IsA("BasePart") then
             local insideChar = char and subj:IsDescendantOf(char)
             if not insideChar then
-                -- если у BasePart есть родитель-модель вне workspace — берём её
                 local par = subj.Parent
                 if par and par ~= workspace and not par:IsA("Player") then
                     return par
@@ -160,12 +164,33 @@ local function getOwnVehicle()
                 return subj
             end
         end
+
+        if char then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root then
+                local dist = (cam.CFrame.Position - root.Position).Magnitude
+                if dist > 40 then
+                    local best, bestDist = nil, 30
+                    for _, obj in ipairs(workspace:GetDescendants()) do
+                        if obj:IsA("MeshPart") or obj:IsA("Model") then
+                            local ok, pos = pcall(function()
+                                if obj:IsA("MeshPart") then return obj.Position end
+                                return obj:GetPivot().Position
+                            end)
+                            if ok and pos then
+                                local d = (pos - cam.CFrame.Position).Magnitude
+                                if d < bestDist then best, bestDist = obj, d end
+                            end
+                        end
+                    end
+                    if best then return best end
+                end
+            end
+        end
     end
     return nil
 end
 
--- Позиция "игрока" — откуда считать дистанции.
--- Если на дроне — от дрона. Если пешком — от персонажа. Иначе — от камеры.
 local function getPlayerPos()
     local veh = getOwnVehicle()
     if veh then
@@ -204,7 +229,7 @@ local function isDestroyed(obj)
 
         local primary = obj.PrimaryPart
         if primary and primary.AssemblyLinearVelocity.Magnitude < 0.5
-           and primary.Position.Y < CONFIG.groundY + 3 then
+           and primary.Position.Y < CONFIG.groundY + 5 then
             return true
         end
     end
@@ -246,7 +271,7 @@ local function addTracked(inst, name)
     if tracked[inst] then return false end
     local count = 0
     for _ in pairs(tracked) do count = count + 1 end
-    if count >= 300 then return false end
+    if count >= 400 then return false end
     tracked[inst] = {
         displayName = name or inst.Name,
         isActive    = false,
@@ -273,13 +298,16 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false,
 })
 
+-- ------------------------------------------------------------
+-- MAIN
+-- ------------------------------------------------------------
 local MainTab = Window:CreateTab("Main", nil)
 
-MainTab:CreateSection("Distance")
+MainTab:CreateSection("Distance (для отрисовки)")
 
 MainTab:CreateSlider({
     Name = "Max distance",
-    Range = {CONFIG.minDistance, CONFIG.maxDistance},
+    Range = {100, 10000},
     Increment = 50, Suffix = "m",
     CurrentValue = CONFIG.startDistance,
     Flag = "Distance",
@@ -310,7 +338,7 @@ local ScanStatus = MainTab:CreateParagraph({
 
 local ExtraKeywords = MainTab:CreateInput({
     Name = "Extra keywords (comma separated)",
-    PlaceholderText = "e.g. krot, ugv",
+    PlaceholderText = "e.g. cube, krot, ugv",
     RemoveTextAfterFocusLost = false,
     Flag = "ExtraKeywords",
     Callback = function() end,
@@ -395,20 +423,21 @@ local NearbyParagraph = MainTab:CreateParagraph({
 })
 
 MainTab:CreateButton({
-    Name = "List nearby objects (200m)",
+    Name = "List nearby objects",
     Callback = function()
         local pp = getPlayerPos()
         if not pp then
             NearbyParagraph:Set({Title="Nearby", Content="No position."})
             return
         end
+        local radius = CONFIG.nearbyRadius
         local rows = {}
         for _, obj in ipairs(workspace:GetDescendants()) do
             if obj:IsA("BasePart") or obj:IsA("Model") then
                 local pos, size = getPosSize(obj)
                 if pos and size then
                     local dist = (pos - pp).Magnitude
-                    if dist <= 200 and size <= 100 then
+                    if dist <= radius then
                         table.insert(rows, {
                             name=obj.Name, class=obj.ClassName,
                             dist=dist, y=pos.Y, size=size,
@@ -419,14 +448,14 @@ MainTab:CreateButton({
         end
         table.sort(rows, function(a,b) return a.dist < b.dist end)
         local lines = {}
-        local limit = math.min(#rows, 25)
+        local limit = math.min(#rows, 40)
         for i = 1, limit do
             local r = rows[i]
             table.insert(lines, string.format("%s|%s|%.0fm|Y=%.0f|S=%.1f",
                 r.class, r.name, r.dist, r.y, r.size))
         end
-        if #rows == 0 then lines = {"Nothing within 200m."} end
-        NearbyParagraph:Set({Title="Nearby ("..#rows..")",
+        if #rows == 0 then lines = {"Nothing."} end
+        NearbyParagraph:Set({Title="Nearby ("..#rows..") r="..radius,
             Content=table.concat(lines,"\n")})
     end,
 })
@@ -447,10 +476,72 @@ local ListParagraph = MainTab:CreateParagraph({
     Title = "Tracked (0)", Content = "Nothing yet.",
 })
 
--- ============================================================
+-- ------------------------------------------------------------
 -- SETTINGS
--- ============================================================
+-- ------------------------------------------------------------
 local SettingsTab = Window:CreateTab("Settings", nil)
+
+SettingsTab:CreateSection("Фильтры высоты (Y)")
+
+SettingsTab:CreateSlider({
+    Name = "Min Y (flying threshold)",
+    Range = {-500, 500},
+    Increment = 5, Suffix = " studs",
+    CurrentValue = CONFIG.flyMinY,
+    Flag = "FlyMinY",
+    Callback = function(v)
+        CONFIG.flyMinY = v
+        for inst in pairs(tracked) do
+            local p = getPosSize(inst)
+            if p and p.Y < v then removeTracked(inst) end
+        end
+    end,
+})
+
+SettingsTab:CreateSlider({
+    Name = "Ground Y (remove below)",
+    Range = {-500, 500},
+    Increment = 5, Suffix = " studs",
+    CurrentValue = CONFIG.groundY,
+    Flag = "GroundY",
+    Callback = function(v)
+        CONFIG.groundY = v
+        for inst in pairs(tracked) do
+            if isDestroyed(inst) then removeTracked(inst) end
+        end
+    end,
+})
+
+SettingsTab:CreateSection("Фильтры размера")
+
+SettingsTab:CreateSlider({
+    Name = "Min object size",
+    Range = {0, 50},
+    Increment = 0.5, Suffix = " studs",
+    CurrentValue = CONFIG.minSizeMagnitude,
+    Flag = "MinSize",
+    Callback = function(v) CONFIG.minSizeMagnitude = v end,
+})
+
+SettingsTab:CreateSlider({
+    Name = "Max object size",
+    Range = {5, 200},
+    Increment = 1, Suffix = " studs",
+    CurrentValue = CONFIG.maxSizeMagnitude,
+    Flag = "MaxSize",
+    Callback = function(v) CONFIG.maxSizeMagnitude = v end,
+})
+
+SettingsTab:CreateSection("Debug scan")
+
+SettingsTab:CreateSlider({
+    Name = "List nearby radius",
+    Range = {100, 3000},
+    Increment = 50, Suffix = "m",
+    CurrentValue = CONFIG.nearbyRadius,
+    Flag = "NearbyRadius",
+    Callback = function(v) CONFIG.nearbyRadius = v end,
+})
 
 SettingsTab:CreateSection("Outline")
 
@@ -482,7 +573,8 @@ SettingsTab:CreateColorPicker({
 
 SettingsTab:CreateSlider({
     Name = "Outline transparency",
-    Range = {0, 1}, Increment = 0.05, Suffix = "",
+    Range = {0, 1},
+    Increment = 0.05, Suffix = "",
     CurrentValue = CONFIG.outlineTransparency,
     Flag = "OutlineTransparency",
     Callback = function(v)
@@ -493,50 +585,17 @@ SettingsTab:CreateSlider({
     end,
 })
 
-SettingsTab:CreateSection("Filters")
-
-SettingsTab:CreateSlider({
-    Name = "Min Y (flying threshold)",
-    Range = {0, 200}, Increment = 5, Suffix = " studs",
-    CurrentValue = CONFIG.flyMinY,
-    Flag = "FlyMinY",
-    Callback = function(v) CONFIG.flyMinY = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Min object size",
-    Range = {0, 20}, Increment = 0.5, Suffix = " studs",
-    CurrentValue = CONFIG.minSizeMagnitude,
-    Flag = "MinSize",
-    Callback = function(v) CONFIG.minSizeMagnitude = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Max object size",
-    Range = {10, 200}, Increment = 5, Suffix = " studs",
-    CurrentValue = CONFIG.maxSizeMagnitude,
-    Flag = "MaxSize",
-    Callback = function(v) CONFIG.maxSizeMagnitude = v end,
-})
-
-SettingsTab:CreateSlider({
-    Name = "Ground Y (remove below)",
-    Range = {0, 50}, Increment = 1, Suffix = " studs",
-    CurrentValue = CONFIG.groundY,
-    Flag = "GroundY",
-    Callback = function(v) CONFIG.groundY = v end,
-})
-
 SettingsTab:CreateSlider({
     Name = "Max active highlights",
-    Range = {5, 30}, Increment = 1, Suffix = "",
+    Range = {5, 30},
+    Increment = 1, Suffix = "",
     CurrentValue = CONFIG.maxActiveHighlights,
     Flag = "MaxHL",
     Callback = function(v) CONFIG.maxActiveHighlights = v end,
 })
 
 -- ============================================================
--- СВОЙ ТРАНСПОРТ / ДРОН
+-- СВОЙ ДРОН
 -- ============================================================
 local ownHighlighted = nil
 
@@ -561,13 +620,21 @@ end
 -- ============================================================
 -- REFRESH HIGHLIGHTS
 -- ============================================================
+local ownCharName = ""
+local function refreshOwnCharName()
+    local ch = LocalPlayer.Character
+    ownCharName = ch and ch.Name or LocalPlayer.Name
+end
+
 local function refreshHighlights()
     local pp = getPlayerPos()
     if not pp then return end
 
     local list = {}
     for inst, data in pairs(tracked) do
-        if inst.Parent and inst:IsDescendantOf(workspace) and not isDestroyed(inst) then
+        if inst.Name == ownCharName then
+            removeTracked(inst)
+        elseif inst.Parent and inst:IsDescendantOf(workspace) and not isDestroyed(inst) then
             local pos = getPosSize(inst)
             if pos then
                 local dist = (pos - pp).Magnitude
@@ -581,9 +648,7 @@ local function refreshHighlights()
 
     local activeSet = {}
     local limit = math.min(#list, CONFIG.maxActiveHighlights)
-    for i = 1, limit do
-        activeSet[list[i].inst] = true
-    end
+    for i = 1, limit do activeSet[list[i].inst] = true end
 
     for inst, data in pairs(tracked) do
         if not inst.Parent or not inst:IsDescendantOf(workspace) then
@@ -608,11 +673,12 @@ local function refreshHighlights()
 end
 
 -- ============================================================
--- СПИСОК + CLEANUP
+-- СПИСОК
 -- ============================================================
 task.spawn(function()
     while true do
         task.wait(0.4)
+        refreshOwnCharName()
         updateOwnHighlight()
 
         local pp = getPlayerPos()
@@ -643,10 +709,9 @@ task.spawn(function()
                 table.insert(lines, "... +"..(#rows-limit).." more")
             end
             if #lines == 0 then lines = {"Nothing tracked."} end
-
-            local mode = getOwnVehicle() and " (FPV/vehicle)" or ""
+            local mode = getOwnVehicle() and " [FPV/vehicle]" or ""
             ListParagraph:Set({
-                Title = "Tracked ("..count..")"..mode.."  active: <= "..CONFIG.maxActiveHighlights,
+                Title = "Tracked ("..count..")"..mode.." active<="..CONFIG.maxActiveHighlights,
                 Content = table.concat(lines,"\n"),
             })
         end
@@ -705,6 +770,31 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 -- ============================================================
+-- РАЗБЛОКИРОВКА МЫШИ В FPV
+-- ============================================================
+local uiUnlocked = false
+
+RunService.RenderStepped:Connect(function()
+    if uiUnlocked then
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        uiUnlocked = not uiUnlocked
+        if Rayfield and Rayfield.ToggleUI then
+            pcall(function() Rayfield:ToggleUI() end)
+        end
+        if not uiUnlocked then
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        end
+    end
+end)
+
+-- ============================================================
 -- INIT
 -- ============================================================
 for _, kw in ipairs(CONFIG.droneKeywords) do
@@ -737,4 +827,4 @@ Rayfield:Notify({
     Duration = 4,
 })
 
-print("[ObjectTracker v3.5] ready")
+print("[ObjectTracker v4] ready")
