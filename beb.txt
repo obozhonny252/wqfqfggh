@@ -1,0 +1,151 @@
+-- Загрузка Rayfield
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "Skyfire Line Cleaner",
+    LoadingTitle = "Загрузка...",
+    LoadingSubtitle = "Убираем линии сигнала",
+    ConfigurationSaving = { Enabled = false },
+    KeySystem = false
+})
+
+local MainTab = Window:CreateTab("Линии", 4483362458)
+
+local isActive = false
+local targets = {}
+local connections = {} -- Хранилище для событий (чтобы не было утечек памяти)
+
+-- Функция поиска конкретных объектов
+local function findLines()
+    table.clear(targets)
+    local playerGui = game.Players.LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return end
+    
+    local trv = playerGui:FindFirstChild("TRV")
+    if trv then
+        local droneHUD = trv:FindFirstChild("DroneHUD")
+        if droneHUD then
+            for _, name in ipairs({"Line1", "Line2", "Structure"}) do
+                local obj = droneHUD:FindFirstChild(name)
+                if obj then
+                    table.insert(targets, obj)
+                    if name == "Structure" then
+                        for _, child in ipairs(obj:GetDescendants()) do
+                            if child:IsA("ImageLabel") or child:IsA("Frame") then
+                                table.insert(targets, child)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Функция мгновенного скрытия
+local function hideObject(obj)
+    if not obj or not obj.Parent then return end
+    if obj.Visible then obj.Visible = false end
+    if obj:IsA("ImageLabel") and obj.ImageTransparency ~= 1 then obj.ImageTransparency = 1 end
+    if obj:IsA("Frame") and obj.BackgroundTransparency ~= 1 then obj.BackgroundTransparency = 1 end
+end
+
+-- Настройка событий (самая быстрая часть)
+local function setupSignals()
+    -- Отключаем старые события
+    for _, conn in ipairs(connections) do
+        if conn then conn:Disconnect() end
+    end
+    table.clear(connections)
+    
+    findLines()
+    
+    for _, obj in ipairs(targets) do
+        if obj and obj.Parent then
+            hideObject(obj) -- Скрываем сразу
+            
+            -- Подписываемся на изменения. Если игра попытается включить - мы выключим обратно
+            table.insert(connections, obj:GetPropertyChangedSignal("Visible"):Connect(function()
+                if isActive then hideObject(obj) end
+            end))
+            if obj:IsA("ImageLabel") then
+                table.insert(connections, obj:GetPropertyChangedSignal("ImageTransparency"):Connect(function()
+                    if isActive then obj.ImageTransparency = 1 end
+                end))
+            end
+            if obj:IsA("Frame") then
+                table.insert(connections, obj:GetPropertyChangedSignal("BackgroundTransparency"):Connect(function()
+                    if isActive then obj.BackgroundTransparency = 1 end
+                end))
+            end
+        end
+    end
+end
+
+MainTab:CreateButton({
+    Name = "Найти линии (Line1, Line2)",
+    Callback = function()
+        setupSignals()
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Убрать линии сигнала",
+    CurrentValue = false,
+    Flag = "DisableLines",
+    Callback = function(Value)
+        isActive = Value
+        if isActive then
+            setupSignals()
+        else
+            -- Возвращаем всё как было
+            for _, obj in ipairs(targets) do
+                if obj and obj.Parent then
+                    obj.Visible = true
+                    if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
+                    if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
+                end
+            end
+        end
+    end,
+})
+
+-- ================= ФОНОВЫЙ ЦИКЛ (ТОЛЬКО ДЛЯ ПОДСТРАХОВКИ) =================
+-- Работает раз в 2 секунды, только если есть подозрение, что игра пересоздала объекты
+task.spawn(function()
+    while task.wait(2) do
+        if isActive then
+            -- Быстрая проверка, живы ли объекты. Если нет - пересоздаем связи
+            local needsRefresh = false
+            for _, obj in ipairs(targets) do
+                if not obj or not obj.Parent then
+                    needsRefresh = true
+                    break
+                end
+            end
+            if needsRefresh then
+                setupSignals()
+            end
+        end
+    end
+end)
+
+MainTab:CreateButton({
+    Name = "Unload Script",
+    Callback = function()
+        isActive = false
+        -- Отключаем все события
+        for _, conn in ipairs(connections) do
+            if conn then conn:Disconnect() end
+        end
+        -- Возвращаем видимость
+        for _, obj in ipairs(targets) do
+            if obj and obj.Parent then
+                obj.Visible = true
+                if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
+                if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
+            end
+        end
+        Rayfield:Destroy()
+    end,
+})
