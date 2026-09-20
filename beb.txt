@@ -14,52 +14,113 @@ local MainTab = Window:CreateTab("Линии", 4483362458)
 local isActive = false
 local targets = {}
 
--- Функция поиска конкретных объектов (Line1, Line2, Structure)
+-- ============================================================
+-- СЮДА ВПИШИ НОВЫЕ НАЗВАНИЯ ОБЪЕКТОВ (если найдёшь ещё помехи)
+-- Формат: "ТочноеИмяОбъекта" (как в Dark Dex)
+-- ============================================================
+local extraNames = {
+    -- "SignalLoss",
+    -- "GlitchFrame",
+    -- "StaticPlane",
+}
+
+-- ============================================================
+-- СЮДА ВПИШИ КЛЮЧЕВЫЕ СЛОВА (для автопоиска по имени)
+-- Например: "signal", "glitch", "scan"
+-- ============================================================
+local extraKeywords = {
+    -- "signal",
+    -- "glitch",
+    -- "scan",
+}
+
+-- Основные объекты (твой рабочий список — не трогаем)
+local baseNames = {"Line1", "Line2", "Structure"}
+
+-- ============================================================
+-- ФУНКЦИЯ ПОИСКА
+-- ============================================================
 local function findLines()
     table.clear(targets)
     local playerGui = game.Players.LocalPlayer:FindFirstChild("PlayerGui")
     if not playerGui then return end
     
     local trv = playerGui:FindFirstChild("TRV")
-    if trv then
-        local droneHUD = trv:FindFirstChild("DroneHUD")
-        if droneHUD then
-            -- Ищем Line1, Line2 и Structure
-            for _, name in ipairs({"Line1", "Line2", "Structure"}) do
-                local obj = droneHUD:FindFirstChild(name)
-                if obj then
-                    table.insert(targets, obj)
-                    -- Если это папка Structure, скрываем всех её потомков
-                    if name == "Structure" then
-                        for _, child in ipairs(obj:GetDescendants()) do
-                            if child:IsA("ImageLabel") or child:IsA("Frame") then
-                                table.insert(targets, child)
-                            end
+    if not trv then return end
+    
+    -- 1. Поиск базовых объектов в DroneHUD (твой рабочий способ)
+    local droneHUD = trv:FindFirstChild("DroneHUD")
+    if droneHUD then
+        for _, name in ipairs(baseNames) do
+            local obj = droneHUD:FindFirstChild(name)
+            if obj then
+                table.insert(targets, obj)
+                if name == "Structure" then
+                    for _, child in ipairs(obj:GetDescendants()) do
+                        if child:IsA("ImageLabel") or child:IsA("Frame") then
+                            table.insert(targets, child)
                         end
                     end
                 end
             end
-            print("Найдено объектов линий:", #targets)
+        end
+        
+        -- Дополнительные имена (если ты их впишешь)
+        for _, name in ipairs(extraNames) do
+            local obj = droneHUD:FindFirstChild(name)
+            if obj then
+                table.insert(targets, obj)
+            end
         end
     end
-end
-
--- Функция применения
-local function applySettings()
-    for _, obj in ipairs(targets) do
-        if obj and obj.Parent then
-            if isActive then
-                obj.Visible = false
-                if obj:IsA("ImageLabel") then obj.ImageTransparency = 1 end
-                if obj:IsA("Frame") then obj.BackgroundTransparency = 1 end
-            else
-                obj.Visible = true
-                if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
-                if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
+    
+    -- 2. Автопоиск по ключевым словам (если ты их впишешь)
+    if #extraKeywords > 0 then
+        for _, obj in ipairs(trv:GetDescendants()) do
+            if obj:IsA("ImageLabel") or obj:IsA("Frame") then
+                local n = obj.Name:lower()
+                for _, kw in ipairs(extraKeywords) do
+                    if string.find(n, kw) then
+                        table.insert(targets, obj)
+                        break
+                    end
+                end
             end
         end
     end
 end
+
+-- ============================================================
+-- ФУНКЦИЯ ПРИМЕНЕНИЯ (с проверками — это и есть оптимизация)
+-- ============================================================
+local function applySettings()
+    for _, obj in ipairs(targets) do
+        if obj and obj.Parent then
+            if isActive then
+                -- Меняем только если свойство реально другое
+                if obj.Visible then obj.Visible = false end
+                if obj:IsA("ImageLabel") and obj.ImageTransparency < 1 then
+                    obj.ImageTransparency = 1
+                end
+                if obj:IsA("Frame") and obj.BackgroundTransparency < 1 then
+                    obj.BackgroundTransparency = 1
+                end
+            else
+                if not obj.Visible then obj.Visible = true end
+                if obj:IsA("ImageLabel") and obj.ImageTransparency > 0 then
+                    obj.ImageTransparency = 0
+                end
+                if obj:IsA("Frame") and obj.BackgroundTransparency > 0 then
+                    obj.BackgroundTransparency = 0
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- ИНТЕРФЕЙС
+-- ============================================================
 
 MainTab:CreateButton({
     Name = "Найти линии (Line1, Line2)",
@@ -79,20 +140,14 @@ MainTab:CreateToggle({
     end,
 })
 
--- Фоновый цикл (работает быстро, но не лагает, так как объектов мало)
+-- ============================================================
+-- ФОНОВЫЙ ЦИКЛ (тот же 0.1 сек, но с оптимизацией)
+-- ============================================================
 task.spawn(function()
     while task.wait(0.1) do
         if isActive then
-            -- Если объектов нет в кэше, ищем их
             if #targets == 0 then findLines() end
-            -- Принудительно скрываем
-            for _, obj in ipairs(targets) do
-                if obj and obj.Parent then
-                    obj.Visible = false
-                    if obj:IsA("ImageLabel") then obj.ImageTransparency = 1 end
-                    if obj:IsA("Frame") then obj.BackgroundTransparency = 1 end
-                end
-            end
+            applySettings()
         end
     end
 end)
@@ -101,7 +156,7 @@ MainTab:CreateButton({
     Name = "Unload Script",
     Callback = function()
         isActive = false
-        applySettings() -- Возвращаем видимость
+        applySettings()
         Rayfield:Destroy()
         print("Skyfire Line Cleaner выгружен.")
     end,
