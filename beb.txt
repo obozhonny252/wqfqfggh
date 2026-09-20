@@ -1,70 +1,95 @@
 -- Загрузка Rayfield
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
--- Создание окна
 local Window = Rayfield:CreateWindow({
     Name = "Skyfire FPV Cleaner",
     LoadingTitle = "Загрузка...",
     LoadingSubtitle = "Убираем помехи дрона",
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "SkyfireFPV",
-        FileName = "FPVConfig"
-    },
+    ConfigurationSaving = { Enabled = true, FolderName = "SkyfireFPV", FileName = "FPVConfig" },
     KeySystem = false
 })
 
 local MainTab = Window:CreateTab("Помехи", 4483362458)
 
 -- ================= НАСТРОЙКИ =================
-local isActive = false       -- Включен ли режим удаления помех
-local alphaValue = 0         -- Прозрачность (0 - видно, 1 - невидимо)
-local targets = {}           -- Кэш найденных объектов
-local keywords = {"noise", "jamming", "static", "glitch", "snow", "overlay", "interference"} -- Ключевые слова для поиска
+local isActive = false
+local alphaValue = 0
+local targets = {}
+
+-- Расширенные ключевые слова для поиска ВСЕХ видов помех, включая потерю сигнала
+local keywords = {
+    "noise", "jamming", "static", "glitch", "snow", "overlay", 
+    "interference", "line", "distortion", "scanline", "strip", 
+    "band", "video", "feed", "stripe", "artifact", "signal", 
+    "loss", "dist", "far", "break", "corrupt"
+}
 
 -- ================= ФУНКЦИИ =================
 
--- Функция поиска всех возможных помех во всем PlayerGui
 local function findInterference()
     table.clear(targets)
     local playerGui = game.Players.LocalPlayer:FindFirstChild("PlayerGui")
-    if not playerGui then return end
+    local camera = workspace.CurrentCamera
+    local lighting = game.Lighting
     
-    for _, obj in ipairs(playerGui:GetDescendants()) do
-        if obj:IsA("ImageLabel") or obj:IsA("Frame") then
-            for _, kw in ipairs(keywords) do
-                if string.find(obj.Name:lower(), kw) then
-                    table.insert(targets, obj)
-                    break
+    -- 1. Поиск в PlayerGui
+    if playerGui then
+        for _, obj in ipairs(playerGui:GetDescendants()) do
+            if obj:IsA("ImageLabel") or obj:IsA("Frame") then
+                local objName = obj.Name:lower()
+                for _, kw in ipairs(keywords) do
+                    if string.find(objName, kw) then
+                        table.insert(targets, obj)
+                        break
+                    end
                 end
             end
         end
     end
-    print("Найдено объектов помех:", #targets)
-end
-
--- Функция применения настроек к объектам
-local function applySettings()
-    for _, obj in ipairs(targets) do
-        if obj and obj.Parent then
-            -- Если ползунок на максимум или включен тумблер - скрываем
-            if isActive or alphaValue >= 1 then
-                obj.Visible = false
-            else
-                obj.Visible = true
-                if obj:IsA("ImageLabel") then
-                    obj.ImageTransparency = alphaValue
-                elseif obj:IsA("Frame") then
-                    obj.BackgroundTransparency = alphaValue
+    
+    -- 2. Поиск в CurrentCamera (иногда эффекты крепятся прямо к камере)
+    if camera then
+        for _, obj in ipairs(camera:GetChildren()) do
+            if obj:IsA("ImageLabel") or obj:IsA("Frame") then
+                local objName = obj.Name:lower()
+                for _, kw in ipairs(keywords) do
+                    if string.find(objName, kw) then
+                        table.insert(targets, obj)
+                        break
+                    end
                 end
             end
+        end
+    end
+end
+
+local function applySettings()
+    -- Отключаем эффекты постобработки в Lighting, если они есть
+    if game.Lighting:FindFirstChildOfClass("BlurEffect") then
+        game.Lighting:FindFirstChildOfClass("BlurEffect").Enabled = not isActive
+    end
+    if game.Lighting:FindFirstChildOfClass("ColorCorrectionEffect") then
+        game.Lighting:FindFirstChildOfClass("ColorCorrectionEffect").Enabled = not isActive
+    end
+
+    for _, obj in ipairs(targets) do
+        if obj and obj.Parent then
+            if isActive or alphaValue >= 1 then
+                obj.Visible = false
+                if obj:IsA("ImageLabel") then obj.ImageTransparency = 1 end
+                if obj:IsA("Frame") then obj.BackgroundTransparency = 1 end
+            else
+                obj.Visible = true
+                if obj:IsA("ImageLabel") then obj.ImageTransparency = alphaValue end
+                if obj:IsA("Frame") then obj.BackgroundTransparency = alphaValue end
+            end
             
-            -- Применяем к дочерним элементам (например, папка Images внутри Noise)
-            for _, child in ipairs(obj:GetChildren()) do
+            -- Применяем к дочерним элементам (например, полоски внутри объекта)
+            for _, child in ipairs(obj:GetDescendants()) do
                 if child:IsA("ImageLabel") then
-                    child.ImageTransparency = alphaValue
+                    child.ImageTransparency = (isActive or alphaValue >= 1) and 1 or alphaValue
                 elseif child:IsA("Frame") then
-                    child.BackgroundTransparency = alphaValue
+                    child.BackgroundTransparency = (isActive or alphaValue >= 1) and 1 or alphaValue
                 end
             end
         end
@@ -73,7 +98,6 @@ end
 
 -- ================= ИНТЕРФЕЙС =================
 
--- Кнопка обновления поиска (если вы сели в новый дрон)
 MainTab:CreateButton({
     Name = "Обновить поиск помех",
     Callback = function()
@@ -82,7 +106,6 @@ MainTab:CreateButton({
     end,
 })
 
--- Переключатель для полного скрытия
 MainTab:CreateToggle({
     Name = "Убрать помехи полностью",
     CurrentValue = false,
@@ -93,7 +116,6 @@ MainTab:CreateToggle({
     end,
 })
 
--- Ползунок прозрачности
 MainTab:CreateSlider({
     Name = "Прозрачность помех",
     Range = {0, 1},
@@ -103,32 +125,25 @@ MainTab:CreateSlider({
     Flag = "NoiseAlpha",
     Callback = function(Value)
         alphaValue = Value
-        isActive = false -- Если двигаем ползунок, выключаем тумблер
+        isActive = false 
         applySettings()
     end,
 })
 
--- ================= ФОНОВЫЙ ЦИКЛ (БЕЗ ЛАГОВ) =================
--- Этот цикл работает каждые 0.2 секунды (а не каждый кадр), чтобы игра не могла вернуть помехи обратно
+-- ================= ФОНОВЫЕ ЦИКЛЫ =================
+
+-- Поиск новых объектов (раз в 3 секунды, чтобы не лагало)
 task.spawn(function()
-    while task.wait(0.2) do
+    while task.wait(3) do
+        findInterference()
+    end
+end)
+
+-- Принудительное скрытие (раз в 0.15 секунды, чтобы игра не могла вернуть помехи)
+task.spawn(function()
+    while task.wait(0.15) do
         if isActive or alphaValue > 0 then
-            -- Если игра пересоздала объекты, находим их заново (редко, но бывает)
-            if #targets == 0 then
-                findInterference()
-            end
-            
-            -- Принудительно применяем настройки
-            for _, obj in ipairs(targets) do
-                if obj and obj.Parent then
-                    if isActive then
-                        obj.Visible = false
-                    elseif alphaValue > 0 then
-                        if obj:IsA("ImageLabel") then obj.ImageTransparency = alphaValue end
-                        if obj:IsA("Frame") then obj.BackgroundTransparency = alphaValue end
-                    end
-                end
-            end
+            applySettings()
         end
     end
 end)
@@ -137,21 +152,18 @@ end)
 MainTab:CreateButton({
     Name = "Unload Script",
     Callback = function()
-        -- 1. Возвращаем все в исходное состояние
         for _, obj in ipairs(targets) do
             if obj and obj.Parent then
                 obj.Visible = true
                 if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
                 if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
-                for _, child in ipairs(obj:GetChildren()) do
+                for _, child in ipairs(obj:GetDescendants()) do
                     if child:IsA("ImageLabel") then child.ImageTransparency = 0 end
                     if child:IsA("Frame") then child.BackgroundTransparency = 0 end
                 end
             end
         end
-        
-        -- 2. Уничтожаем интерфейс
         Rayfield:Destroy()
-        print("Skyfire FPV Cleaner выгружен, помехи возвращены.")
+        print("Skyfire FPV Cleaner выгружен.")
     end,
 })
