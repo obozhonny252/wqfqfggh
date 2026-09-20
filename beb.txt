@@ -13,7 +13,6 @@ local MainTab = Window:CreateTab("Линии", 4483362458)
 
 local isActive = false
 local targets = {}
-local connections = {} -- Хранилище для событий (чтобы не было утечек памяти)
 
 -- Функция поиска конкретных объектов
 local function findLines()
@@ -42,50 +41,43 @@ local function findLines()
     end
 end
 
--- Функция мгновенного скрытия
-local function hideObject(obj)
-    if not obj or not obj.Parent then return end
-    if obj.Visible then obj.Visible = false end
-    if obj:IsA("ImageLabel") and obj.ImageTransparency ~= 1 then obj.ImageTransparency = 1 end
-    if obj:IsA("Frame") and obj.BackgroundTransparency ~= 1 then obj.BackgroundTransparency = 1 end
-end
-
--- Настройка событий (самая быстрая часть)
-local function setupSignals()
-    -- Отключаем старые события
-    for _, conn in ipairs(connections) do
-        if conn then conn:Disconnect() end
-    end
-    table.clear(connections)
-    
-    findLines()
-    
+-- Принудительное скрытие (умное — трогает только то, что нужно)
+local function forceHide()
     for _, obj in ipairs(targets) do
         if obj and obj.Parent then
-            hideObject(obj) -- Скрываем сразу
-            
-            -- Подписываемся на изменения. Если игра попытается включить - мы выключим обратно
-            table.insert(connections, obj:GetPropertyChangedSignal("Visible"):Connect(function()
-                if isActive then hideObject(obj) end
-            end))
-            if obj:IsA("ImageLabel") then
-                table.insert(connections, obj:GetPropertyChangedSignal("ImageTransparency"):Connect(function()
-                    if isActive then obj.ImageTransparency = 1 end
-                end))
+            if obj.Visible then 
+                pcall(function() obj.Visible = false end) 
             end
-            if obj:IsA("Frame") then
-                table.insert(connections, obj:GetPropertyChangedSignal("BackgroundTransparency"):Connect(function()
-                    if isActive then obj.BackgroundTransparency = 1 end
-                end))
+            if obj:IsA("ImageLabel") and obj.ImageTransparency < 1 then 
+                pcall(function() obj.ImageTransparency = 1 end) 
+            end
+            if obj:IsA("Frame") and obj.BackgroundTransparency < 1 then 
+                pcall(function() obj.BackgroundTransparency = 1 end) 
             end
         end
     end
 end
 
+-- Возврат в исходное состояние
+local function restoreAll()
+    for _, obj in ipairs(targets) do
+        if obj and obj.Parent then
+            pcall(function()
+                obj.Visible = true
+                if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
+                if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
+            end)
+        end
+    end
+end
+
+-- ================= ИНТЕРФЕЙС =================
+
 MainTab:CreateButton({
     Name = "Найти линии (Line1, Line2)",
     Callback = function()
-        setupSignals()
+        findLines()
+        if isActive then forceHide() end
     end,
 })
 
@@ -96,56 +88,38 @@ MainTab:CreateToggle({
     Callback = function(Value)
         isActive = Value
         if isActive then
-            setupSignals()
+            if #targets == 0 then findLines() end
+            forceHide()
         else
-            -- Возвращаем всё как было
-            for _, obj in ipairs(targets) do
-                if obj and obj.Parent then
-                    obj.Visible = true
-                    if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
-                    if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
-                end
-            end
+            restoreAll()
         end
     end,
 })
 
--- ================= ФОНОВЫЙ ЦИКЛ (ТОЛЬКО ДЛЯ ПОДСТРАХОВКИ) =================
--- Работает раз в 2 секунды, только если есть подозрение, что игра пересоздала объекты
+-- ================= ОПТИМИЗИРОВАННЫЕ ЦИКЛЫ =================
+
+-- Цикл 1: Обновление кэша (раз в 3 сек — только для поиска новых объектов)
 task.spawn(function()
-    while task.wait(2) do
-        if isActive then
-            -- Быстрая проверка, живы ли объекты. Если нет - пересоздаем связи
-            local needsRefresh = false
-            for _, obj in ipairs(targets) do
-                if not obj or not obj.Parent then
-                    needsRefresh = true
-                    break
-                end
-            end
-            if needsRefresh then
-                setupSignals()
-            end
+    while task.wait(3) do
+        if isActive then findLines() end
+    end
+end)
+
+-- Цикл 2: Принудительное скрытие (раз в 0.25 сек, но с проверками)
+task.spawn(function()
+    while task.wait(0.25) do
+        if isActive and #targets > 0 then
+            forceHide()
         end
     end
 end)
 
+-- ================= ВЫГРУЗКА =================
 MainTab:CreateButton({
     Name = "Unload Script",
     Callback = function()
         isActive = false
-        -- Отключаем все события
-        for _, conn in ipairs(connections) do
-            if conn then conn:Disconnect() end
-        end
-        -- Возвращаем видимость
-        for _, obj in ipairs(targets) do
-            if obj and obj.Parent then
-                obj.Visible = true
-                if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
-                if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
-            end
-        end
+        restoreAll()
         Rayfield:Destroy()
     end,
 })
