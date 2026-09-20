@@ -24,10 +24,12 @@ local function findLines()
     if trv then
         local droneHUD = trv:FindFirstChild("DroneHUD")
         if droneHUD then
+            -- Ищем Line1, Line2 и Structure
             for _, name in ipairs({"Line1", "Line2", "Structure"}) do
                 local obj = droneHUD:FindFirstChild(name)
                 if obj then
                     table.insert(targets, obj)
+                    -- Если это папка Structure, скрываем всех её потомков
                     if name == "Structure" then
                         for _, child in ipairs(obj:GetDescendants()) do
                             if child:IsA("ImageLabel") or child:IsA("Frame") then
@@ -37,6 +39,7 @@ local function findLines()
                     end
                 end
             end
+            print("Найдено объектов линий:", #targets)
         end
     end
 end
@@ -80,7 +83,9 @@ MainTab:CreateToggle({
 task.spawn(function()
     while task.wait(0.1) do
         if isActive then
+            -- Если объектов нет в кэше, ищем их
             if #targets == 0 then findLines() end
+            -- Принудительно скрываем
             for _, obj in ipairs(targets) do
                 if obj and obj.Parent then
                     obj.Visible = false
