@@ -14,130 +14,90 @@ local MainTab = Window:CreateTab("Линии", 4483362458)
 local isActive = false
 local targets = {}
 
--- Расширенный список ключевых слов (тот, что у тебя работал)
-local keywords = {
-    "noise", "jamming", "static", "glitch", "snow", "overlay", 
-    "interference", "line", "distortion", "scanline", "strip", 
-    "band", "video", "feed", "stripe", "artifact", "signal", 
-    "loss", "dist", "far", "break", "corrupt"
-}
-
--- Функция поиска
-local function findInterference()
+-- Функция поиска конкретных объектов (Line1, Line2, Structure)
+local function findLines()
     table.clear(targets)
     local playerGui = game.Players.LocalPlayer:FindFirstChild("PlayerGui")
-    local camera = workspace.CurrentCamera
+    if not playerGui then return end
     
-    local function scanContainer(container)
-        if not container then return end
-        for _, obj in ipairs(container:GetDescendants()) do
-            if obj:IsA("ImageLabel") or obj:IsA("Frame") then
-                local objName = obj.Name:lower()
-                for _, kw in ipairs(keywords) do
-                    if string.find(objName, kw) then
-                        table.insert(targets, obj)
-                        break
+    local trv = playerGui:FindFirstChild("TRV")
+    if trv then
+        local droneHUD = trv:FindFirstChild("DroneHUD")
+        if droneHUD then
+            for _, name in ipairs({"Line1", "Line2", "Structure"}) do
+                local obj = droneHUD:FindFirstChild(name)
+                if obj then
+                    table.insert(targets, obj)
+                    if name == "Structure" then
+                        for _, child in ipairs(obj:GetDescendants()) do
+                            if child:IsA("ImageLabel") or child:IsA("Frame") then
+                                table.insert(targets, child)
+                            end
+                        end
                     end
                 end
             end
         end
     end
-
-    scanContainer(playerGui)
-    scanContainer(camera)
 end
 
--- Принудительное скрытие (меняет только то, что реально нужно)
-local function forceHide()
+-- Функция применения
+local function applySettings()
     for _, obj in ipairs(targets) do
         if obj and obj.Parent then
-            pcall(function()
-                if obj.Visible then obj.Visible = false end
-                if obj:IsA("ImageLabel") and obj.ImageTransparency < 1 then 
-                    obj.ImageTransparency = 1 
-                end
-                if obj:IsA("Frame") and obj.BackgroundTransparency < 1 then 
-                    obj.BackgroundTransparency = 1 
-                end
-            end)
-        end
-    end
-end
-
--- Возврат в исходное состояние
-local function restoreAll()
-    for _, obj in ipairs(targets) do
-        if obj and obj.Parent then
-            pcall(function()
+            if isActive then
+                obj.Visible = false
+                if obj:IsA("ImageLabel") then obj.ImageTransparency = 1 end
+                if obj:IsA("Frame") then obj.BackgroundTransparency = 1 end
+            else
                 obj.Visible = true
                 if obj:IsA("ImageLabel") then obj.ImageTransparency = 0 end
                 if obj:IsA("Frame") then obj.BackgroundTransparency = 0 end
-            end)
+            end
         end
     end
 end
 
--- ================= ИНТЕРФЕЙС =================
-
 MainTab:CreateButton({
-    Name = "Обновить поиск помех",
+    Name = "Найти линии (Line1, Line2)",
     Callback = function()
-        findInterference()
-        if isActive then forceHide() end
+        findLines()
+        applySettings()
     end,
 })
 
 MainTab:CreateToggle({
-    Name = "Убрать помехи полностью",
+    Name = "Убрать линии сигнала",
     CurrentValue = false,
     Flag = "DisableLines",
     Callback = function(Value)
         isActive = Value
-        if isActive then
-            findInterference()
-            forceHide()
-        else
-            restoreAll()
-        end
+        applySettings()
     end,
 })
 
--- ================= ОПТИМИЗИРОВАННЫЕ ЦИКЛЫ =================
-
--- Цикл 1: Поиск новых объектов (раз в 2 секунды — для подстраховки)
-task.spawn(function()
-    while task.wait(2) do
-        if isActive then
-            -- Проверяем, живы ли старые объекты
-            local needsRefresh = false
-            for _, obj in ipairs(targets) do
-                if not obj or not obj.Parent then
-                    needsRefresh = true
-                    break
-                end
-            end
-            if needsRefresh then
-                findInterference()
-            end
-        end
-    end
-end)
-
--- Цикл 2: Принудительное скрытие (раз в 0.1 секунды, но с проверками — не жрёт ресурсы)
+-- Фоновый цикл (работает быстро, но не лагает, так как объектов мало)
 task.spawn(function()
     while task.wait(0.1) do
-        if isActive and #targets > 0 then
-            forceHide()
+        if isActive then
+            if #targets == 0 then findLines() end
+            for _, obj in ipairs(targets) do
+                if obj and obj.Parent then
+                    obj.Visible = false
+                    if obj:IsA("ImageLabel") then obj.ImageTransparency = 1 end
+                    if obj:IsA("Frame") then obj.BackgroundTransparency = 1 end
+                end
+            end
         end
     end
 end)
 
--- ================= ВЫГРУЗКА =================
 MainTab:CreateButton({
     Name = "Unload Script",
     Callback = function()
         isActive = false
-        restoreAll()
+        applySettings() -- Возвращаем видимость
         Rayfield:Destroy()
+        print("Skyfire Line Cleaner выгружен.")
     end,
 })
